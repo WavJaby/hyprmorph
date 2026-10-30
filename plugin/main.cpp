@@ -6,7 +6,10 @@
 // run inside renderMonitor. So the goal is checked (and the old snapshot captured) at the two points that precede any texture replacement
 // and run outside a render pass: the window surface's precommit, and render.preChecks of every monitor.
 // Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
+// Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread; today it only logs decisions.
 #include "Hold.hpp"
+#include "Readiness.hpp"
+#include "Thumbnail.hpp"
 #include "Transition.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -33,18 +36,33 @@ namespace {
     SP<Config::Values::CIntValue>  cfgCrossfadeMs;
     SP<Config::Values::CIntValue>  cfgNewBufferTimeoutMs;
     SP<Config::Values::CIntValue>  cfgHoldMs;
+    SP<Config::Values::CBoolValue>   cfgReadiness;
+    SP<Config::Values::CStringValue> cfgReadinessDump;
 
     struct STracked {
         PHLWINDOWREF               window;
         Vector2D                   baselineGoal;
         CResizeTransition*         transition = nullptr; // owned by window->m_transformers; valid while window is alive and attached
         WP<CWLSurfaceResource>     surface;
-        CHyprSignalListener        precommit;
+        CHyprSignalListener        precommit, commit;
+        // Readiness bookkeeping: main-surface commits are what makes a thumbnail fresh (desynced subsurfaces are captured but not counted).
+        uint64_t                   generation = 0, commits = 0, notedCommits = 0, sampledCommits = UINT64_MAX;
     };
     // unique_ptr: precommit lambdas hold STracked*, which must survive vector growth.
     std::vector<std::unique_ptr<STracked>> tracked;
 
     CHyprSignalListener preChecksListener;
+
+    // Compositor-thread cost of onPreChecks on frames where a transition was attached (capture + thumbnail submit/poll), ms. Logged at unload.
+    std::vector<double> preChecksMs;
+
+    uint64_t windowId(const PHLWINDOW& w) {
+        return reinterpret_cast<uint64_t>(w.get());
+    }
+
+    uint64_t nowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
 
     // Reaches Hyprland's logger only because the Makefile builds with -fno-gnu-unique (see there).
     void log(const std::string& msg) {
@@ -60,8 +78,10 @@ namespace {
             g_pHyprRenderer->damageWindow(w);
         }
         t.transition = nullptr;
-        if (const auto w = t.window.lock())
+        if (const auto w = t.window.lock()) {
             Hold::release(w, Hold::Clock::now());
+            Readiness::endGeneration(windowId(w));
+        }
         if (!reason.empty())
             log("native drawing: " + reason);
     }
@@ -104,6 +124,10 @@ namespace {
             g_pHyprRenderer->damageWindow(w);
         }
         hold(w);
+        ++t.generation;
+        t.sampledCommits = UINT64_MAX;
+        auto dump        = cfgReadinessDump->value();
+        Readiness::beginGeneration(windowId(w), t.generation, nowNs(), dump == "[[EMPTY]]" ? "" : dump);
     }
 
     void attachSurface(STracked& t, PHLWINDOW w) {
@@ -112,11 +136,14 @@ namespace {
             return;
         t.surface   = surface;
         t.precommit = nullptr;
-        if (surface)
+        t.commit    = nullptr;
+        if (surface) {
             t.precommit = surface->m_events.precommit.listen([raw = &t] {
                 if (const auto win = raw->window.lock(); win && win->m_isMapped)
                     checkGeneration(*raw, win, "precommit");
             });
+            t.commit = surface->m_events.commit.listen([raw = &t] { ++raw->commits; });
+        }
     }
 
     // Lazy attach: first sight takes the current goal as baseline, so a window that just mapped (no old content) never transitions.
@@ -144,7 +171,45 @@ namespace {
         }
     }
 
+    // Readiness FrameSource: one thumbnail of this frame's new-content capture per fresh main-surface commit.
+    void sample(STracked& t, const PHLWINDOW& w) {
+        const auto* content = t.transition->newContent();
+        if (!content || !cfgReadiness->value())
+            return;
+        const auto id = windowId(w);
+        if (t.commits != t.notedCommits) {
+            t.notedCommits = t.commits;
+            Readiness::noteCommit(id, t.commits);
+        }
+        if (t.commits == t.sampledCommits)
+            return;
+        const auto& size = content->fb->m_size;
+        const auto  tex  = content->fb->getTexture();
+        if (!tex || size.x < 1 || size.y < 1)
+            return;
+        const Thumbnail::STag tag{.window = id, .generation = t.generation, .commit = t.commits, .sampleNs = nowNs()};
+        if (Thumbnail::submit(tex->m_texID, 0.F, 0.F, content->contentPx.x / size.x, content->contentPx.y / size.y,
+                              content->contentPx.y / content->contentPx.x, tag))
+            t.sampledCommits = t.commits;
+        else if (*Thumbnail::failure())
+            log(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
+    }
+
+    void logReadiness() {
+        for (const auto& e : Readiness::drain()) {
+            switch (e.kind) {
+                case Readiness::SEvent::SELECTED: log(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::VETOED: log(std::format("readiness 0x{:x} gen {}: selection vetoed at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::REVOKED: log(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::SUMMARY: log("readiness summary " + e.text); break;
+                case Readiness::SEvent::ERROR: log("readiness error: " + e.text); break;
+            }
+        }
+    }
+
     void onPreChecks(PHLMONITOR monitor) {
+        const auto started = std::chrono::steady_clock::now();
+        bool       active  = false;
         syncWindows();
 
         const STransitionConfig config{.crossfadeMs = cfgCrossfadeMs->value(), .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value()};
@@ -158,10 +223,12 @@ namespace {
             }
             if (w->m_monitor.lock() != monitor)
                 continue;
+            active = true;
             if (!t->transition->prepareFrame(config, Hold::held(w, Hold::Clock::now()))) {
                 detach(*t, t->transition->m_failure.empty() ? "transition done" : t->transition->m_failure);
                 continue;
             }
+            sample(*t, w);
             // Hyprland stops damaging the window when the size animation ends, but the crossfade, the new-buffer timeout and the final
             // "done" check all run in prepareFrame: keep one frame queued per frame while attached.
             g_pEventLoopManager->doLater([ref = t->window] {
@@ -169,6 +236,12 @@ namespace {
                     g_pHyprRenderer->damageWindow(win);
             });
         }
+        if (const auto gl = g_pHyprRenderer->glBackend())
+            gl->makeEGLCurrent();
+        Thumbnail::poll([](Thumbnail::SFrame&& frame) { Readiness::submit(std::move(frame)); });
+        logReadiness();
+        if (active)
+            preChecksMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }
 }
 
@@ -194,13 +267,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:hold_ms",
                                                       "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 200,
                                                       Config::Values::SIntValueOptions{.min = 0});
+    cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:readiness", "Sample new content and run the readiness detector (0 = off)", true);
+    cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
+                                                                "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
     for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
-                              SP<Config::Values::IValue>(cfgHoldMs)})
+                              SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
             throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
 
     if (std::string error; !Hold::init(error))
         log("animation hold disabled: " + error);
+    Readiness::start({});
 
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
@@ -221,4 +298,15 @@ APICALL EXPORT void PLUGIN_EXIT() {
     for (auto& t : tracked)
         detach(*t, "");
     tracked.clear();
+    // The worker runs this library's code: join before unmap. Summaries of the generations closed above are logged here.
+    Readiness::stop();
+    logReadiness();
+    if (!preChecksMs.empty()) {
+        std::ranges::sort(preChecksMs);
+        const auto at = [](double q) { return preChecksMs[std::min(preChecksMs.size() - 1, size_t(q * preChecksMs.size()))]; };
+        log(std::format("preChecks ms over {} transition frames: median {:.3f} p95 {:.3f} max {:.3f}", preChecksMs.size(), at(.5), at(.95), preChecksMs.back()));
+    }
+    const auto& tc = Thumbnail::counters();
+    log(std::format("thumbnail counters: submitted {} busy {} completed {} gl_errors {}", tc.submitted, tc.busy, tc.completed, tc.glErrors));
+    Thumbnail::destroy();
 }

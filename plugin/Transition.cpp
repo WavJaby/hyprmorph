@@ -129,6 +129,7 @@ bool CResizeTransition::beginGeneration(const Vector2D& goalSize) {
         return false;
     m_targetAck = goalSize.clamp(Vector2D{0, 0}, Math::VECTOR2D_MAX).floor();
     m_newReady  = false;
+    m_switching = false;
     m_fade      = 0.F;
     m_animEnded = false;
     return true;
@@ -143,12 +144,11 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
     const auto now = steady_clock::now();
 
     // ackedSize lands in m_current with the first commit after ack_configure (CWindow::onAck). That buffer can still be a client-side
-    // transitional frame (kitty: old cells at top-left, rest blank) -- content readiness, not detected here (S3).
-    if (!m_newReady && !held) {
+    // transitional frame (kitty: old cells at top-left, rest blank) -- readiness judges it from the captured m_new, also during a hold.
+    if (!m_newReady) {
         const auto surface = window->resource();
         if (surface && surface->m_current.ackedSize == m_targetAck) {
             m_newReady = true;
-            m_switchAt = now;
             Log::logger->log(Log::DEBUG, "[resize-transition] new buffer: ack {} surface {} geometry {}", m_targetAck, surface->m_current.size,
                              window->m_xdgSurface->m_current.geometry.size());
         }
@@ -157,7 +157,12 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
         // Re-captured every frame: desynced subsurfaces commit without the main surface, so commit-driven capture would miss them.
         if (!capture(m_new))
             return false;
-        m_fade = config.crossfadeMs <= 0 ? 1.F : std::clamp(sc<float>(msSince(m_switchAt, now) / config.crossfadeMs), 0.F, 1.F);
+        if (!held && !m_switching) {
+            m_switching = true;
+            m_switchAt  = now;
+        }
+        if (m_switching)
+            m_fade = config.crossfadeMs <= 0 ? 1.F : std::clamp(sc<float>(msSince(m_switchAt, now) / config.crossfadeMs), 0.F, 1.F);
     }
 
     const bool animating = window->sizeAnimation()->isBeingAnimated();

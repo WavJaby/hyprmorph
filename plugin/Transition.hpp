@@ -32,11 +32,16 @@ class CResizeTransition : public Render::IWindowTransformer {
 
     std::string              m_failure; // last reason the transition gave up, for the log
 
-  private:
     struct SSnapshot {
         SP<Render::IFramebuffer> fb;
         Vector2D                 contentPx; // content occupies (0,0)-contentPx of fb, in fb pixels
     };
+    // This frame's capture of the client's new-size content, or null before the client acked the target size. Readiness samples it.
+    const SSnapshot* newContent() const {
+        return m_newReady && m_new.fb ? &m_new : nullptr;
+    }
+
+  private:
 
     bool                             capture(SSnapshot& out);
     void                             drawSnapshot(const SSnapshot& snap, const CBox& box, float alpha);
@@ -44,7 +49,8 @@ class CResizeTransition : public Render::IWindowTransformer {
     PHLWINDOWREF                     m_window;
     SSnapshot                        m_old, m_new;
     Vector2D                         m_targetAck; // configure size the client must ack (CWindow::sendWindowSize stores goal.floor())
-    bool                             m_newReady = false;
+    bool                             m_newReady  = false; // client acked the target size; m_new is captured every frame from here
+    bool                             m_switching = false; // old -> new fade running (starts at the first frame after any hold)
     std::chrono::steady_clock::time_point m_switchAt, m_animEndAt;
     bool                             m_animEnded = false;
     float                            m_fade      = 0.F; // 0 = old only, 1 = new only
