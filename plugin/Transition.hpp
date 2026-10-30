@@ -40,6 +40,10 @@ class CResizeTransition : public Render::IWindowTransformer {
     const SSnapshot* newContent() const {
         return m_newReady && m_new.fb ? &m_new : nullptr;
     }
+    // The generation's old content (captured at beginGeneration). Readiness builds its D5-1 placeholder alias from it.
+    const SSnapshot& oldContent() const {
+        return m_old;
+    }
 
   private:
 

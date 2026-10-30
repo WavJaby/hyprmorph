@@ -49,6 +49,7 @@ namespace {
         std::filesystem::path              dumpDir;  // empty = no dump
         std::ofstream                      manifest;
         int                                dumped = 0;
+        std::optional<Thumbnail::SFrame>   aliasRegion; // D5-1: old content's shared region; the detector is built at the first frame
     };
 
     Readiness::SConfig              config;
@@ -100,6 +101,43 @@ namespace {
         ++g.dumped;
     }
 
+    void dumpImage(const std::filesystem::path& path, int width, int height, const uint8_t* data, size_t stride, size_t channels) {
+        std::ofstream out(path, std::ios::binary);
+        out << "P6\n" << width << ' ' << height << "\n255\n";
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                for (int c = 0; c < 3; ++c)
+                    out.put(static_cast<char>(data[y * stride + x * channels + (channels == 1 ? 0 : c)]));
+    }
+
+    // D5-1 crop alias in the new frame's thumbnail space, as aliases_from() builds it for recorded traces: old content pasted top-left on
+    // black, mask = the shared region inset by aliasInset. Built at the first frame because only frames carry the new thumbnail size.
+    std::vector<Alias> buildAliases(SGeneration& g, int width, int height) {
+        if (!g.aliasRegion)
+            return {};
+        const auto&          region = *g.aliasRegion;
+        std::vector<uint8_t> rgb(size_t(width) * height * 3, 0);
+        const int            w = std::min(region.width, width), h = std::min(region.height, height), inset = region.tag.aliasInset;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c)
+                    rgb[(size_t(y) * width + x) * 3 + c] = region.rgba[(size_t(y) * region.width + x) * 4 + c];
+        Alias alias;
+        alias.color = lowPass(Image{width, height, 3, size_t(width) * 3, rgb.data()}, Policy{});
+        alias.mask.assign(size_t(width) * height, 0);
+        for (int y = inset; y < h - inset; ++y)
+            for (int x = inset; x < w - inset; ++x)
+                alias.mask[size_t(y) * width + x] = 255;
+        if (g.manifest.is_open()) {
+            const auto image = g.dumpDir / std::format("{:x}-{}-alias.ppm", g.window, g.generation);
+            const auto mask  = g.dumpDir / std::format("{:x}-{}-alias-mask.ppm", g.window, g.generation);
+            dumpImage(image, width, height, rgb.data(), size_t(width) * 3, 3);
+            dumpImage(mask, width, height, alias.mask.data(), size_t(width), 1);
+            g.manifest << "alias " << image.string() << ' ' << mask.string() << '\n';
+        }
+        return {std::move(alias)};
+    }
+
     void apply(Input& input) {
         if (auto* b = std::get_if<SBegin>(&input)) {
             if (auto old = generations.find(b->window); old != generations.end()) {
@@ -110,8 +148,6 @@ namespace {
             g.window     = b->window;
             g.generation = b->generation;
             g.resizeNs   = b->resizeNs;
-            // No old-image aliases: plugin frames always carry protocol evidence (F7); aliases are the screencopy substitute for it.
-            g.detector = std::make_unique<Detector>(Policy{}, std::vector<Alias>{});
             if (!b->dumpDir.empty()) {
                 std::error_code ec;
                 std::filesystem::create_directories(b->dumpDir, ec);
@@ -136,6 +172,12 @@ namespace {
             auto  g     = generations.find(frame.tag.window);
             if (g == generations.end() || g->second.generation != frame.tag.generation)
                 return;
+            if (frame.tag.alias) {
+                g->second.aliasRegion = std::move(frame);
+                return;
+            }
+            if (!g->second.detector)
+                g->second.detector = std::make_unique<Detector>(Policy{}, buildAliases(g->second, frame.width, frame.height));
             g->second.latest = std::make_shared<Thumbnail::SFrame>(std::move(frame));
             g->second.fresh  = true;
             ++g->second.frames;

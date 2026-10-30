@@ -134,7 +134,11 @@ namespace {
     }
 }
 
-bool Thumbnail::submit(unsigned texture, float u0, float v0, float uw, float vh, double aspect, const STag& tag) {
+int Thumbnail::heightFor(double aspect) {
+    return std::clamp(static_cast<int>(std::lround(WIDTH * aspect)), 1, MAX_HEIGHT);
+}
+
+bool Thumbnail::submit(unsigned texture, float u0, float v0, float uw, float vh, int width, int height, const STag& tag) {
     if (!failureText.empty())
         return false;
     const auto free = std::ranges::find_if(slots, [](const SSlot& s) { return !s.fence; });
@@ -146,16 +150,17 @@ bool Thumbnail::submit(unsigned texture, float u0, float v0, float uw, float vh,
     if (!initTried && !init())
         return false;
 
-    const int height = std::clamp(static_cast<int>(std::lround(WIDTH * aspect)), 1, MAX_HEIGHT);
+    width  = std::clamp(width, 1, WIDTH);
+    height = std::clamp(height, 1, MAX_HEIGHT);
     glUseProgram(program);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     glBindSampler(0, sampler);
     glBindImageTexture(0, image, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
     glUniform1i(uSource, 0);
-    glUniform2i(uExtent, WIDTH, height);
+    glUniform2i(uExtent, width, height);
     glUniform4f(uCrop, u0, v0, uw, vh);
-    glDispatchCompute((WIDTH + 7) / 8, (height + 7) / 8, 1);
+    glDispatchCompute((width + 7) / 8, (height + 7) / 8, 1);
     glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, free->pbo);
@@ -163,13 +168,13 @@ bool Thumbnail::submit(unsigned texture, float u0, float v0, float uw, float vh,
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
     glPixelStorei(GL_PACK_SKIP_ROWS, 0);
     glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
-    glReadPixels(0, 0, WIDTH, height, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     free->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     glFlush();
     if (glGetError() != GL_NO_ERROR)
         ++counts.glErrors;
     free->order  = ++submissions;
-    free->width  = WIDTH;
+    free->width  = width;
     free->height = height;
     free->tag    = tag;
     ++counts.submitted;

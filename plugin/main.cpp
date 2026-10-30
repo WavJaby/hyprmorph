@@ -46,7 +46,7 @@ namespace {
         WP<CWLSurfaceResource>     surface;
         CHyprSignalListener        precommit, commit;
         // Readiness bookkeeping: main-surface commits are what makes a thumbnail fresh (desynced subsurfaces are captured but not counted).
-        uint64_t                   generation = 0, commits = 0, notedCommits = 0, sampledCommits = UINT64_MAX;
+        uint64_t                   generation = 0, commits = 0, notedCommits = 0, sampledCommits = UINT64_MAX, aliasGeneration = 0;
     };
     // unique_ptr: precommit lambdas hold STracked*, which must survive vector growth.
     std::vector<std::unique_ptr<STracked>> tracked;
@@ -187,9 +187,28 @@ namespace {
         const auto  tex  = content->fb->getTexture();
         if (!tex || size.x < 1 || size.y < 1)
             return;
+        const auto newPx  = content->contentPx;
+        const int  height = Thumbnail::heightFor(newPx.y / newPx.x);
+        // D5-1 alias first, once per generation: the PBO pool completes in submission order, so the worker always has it before the first
+        // frame. No frame goes out without it -- a frame observed alias-less would bypass the placeholder rule.
+        if (t.aliasGeneration != t.generation) {
+            const auto& old    = t.transition->oldContent();
+            const auto  oldTex = old.fb ? old.fb->getTexture() : nullptr;
+            const auto  monitor = w->m_monitor.lock();
+            if (!oldTex || !monitor)
+                return;
+            const Vector2D shared{std::min(old.contentPx.x, newPx.x), std::min(old.contentPx.y, newPx.y)};
+            // 10 logical px, as aliases_from() masks the recorded traces' crop alias.
+            const int             inset = static_cast<int>(std::lround(10. * monitor->m_scale * Thumbnail::WIDTH / newPx.x));
+            const Thumbnail::STag aliasTag{.window = id, .generation = t.generation, .sampleNs = nowNs(), .alias = true, .aliasInset = inset};
+            if (!Thumbnail::submit(oldTex->m_texID, 0.F, 0.F, shared.x / old.fb->m_size.x, shared.y / old.fb->m_size.y,
+                                   static_cast<int>(std::lround(Thumbnail::WIDTH * shared.x / newPx.x)),
+                                   static_cast<int>(std::lround(height * shared.y / newPx.y)), aliasTag))
+                return;
+            t.aliasGeneration = t.generation;
+        }
         const Thumbnail::STag tag{.window = id, .generation = t.generation, .commit = t.commits, .sampleNs = nowNs()};
-        if (Thumbnail::submit(tex->m_texID, 0.F, 0.F, content->contentPx.x / size.x, content->contentPx.y / size.y,
-                              content->contentPx.y / content->contentPx.x, tag))
+        if (Thumbnail::submit(tex->m_texID, 0.F, 0.F, newPx.x / size.x, newPx.y / size.y, Thumbnail::WIDTH, height, tag))
             t.sampledCommits = t.commits;
         else if (*Thumbnail::failure())
             log(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
