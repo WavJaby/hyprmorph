@@ -23,7 +23,8 @@ class CResizeTransition : public Render::IWindowTransformer {
     bool                     beginGeneration(const Vector2D& goalSize);
 
     // Called before each frame of the window's monitor. false -> transition is over (done or failed); caller detaches.
-    bool                     prepareFrame(const STransitionConfig& config);
+    // held: the animation is held (D3-3) -> the box still has its begin size, so the old snapshot stays; the switch waits for release.
+    bool                     prepareFrame(const STransitionConfig& config, bool held);
 
     SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override;
     void                     preWindowRender(CSurfacePassElement::SRenderData* renderData) override;

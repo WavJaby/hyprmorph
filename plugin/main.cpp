@@ -5,6 +5,8 @@
 // Capture timing: m_realSize's begin callback only queues sendWindowSize via doLater, and m_events.resize fires on animation ticks, which may
 // run inside renderMonitor. So the goal is checked (and the old snapshot captured) at the two points that precede any texture replacement
 // and run outside a render pass: the window surface's precommit, and render.preChecks of every monitor.
+// Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
+#include "Hold.hpp"
 #include "Transition.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -30,6 +32,7 @@ namespace {
     SP<Config::Values::CBoolValue> cfgEnabled;
     SP<Config::Values::CIntValue>  cfgCrossfadeMs;
     SP<Config::Values::CIntValue>  cfgNewBufferTimeoutMs;
+    SP<Config::Values::CIntValue>  cfgHoldMs;
 
     struct STracked {
         PHLWINDOWREF               window;
@@ -57,8 +60,21 @@ namespace {
             g_pHyprRenderer->damageWindow(w);
         }
         t.transition = nullptr;
+        if (const auto w = t.window.lock())
+            Hold::release(w, Hold::Clock::now());
         if (!reason.empty())
             log("native drawing: " + reason);
+    }
+
+    // D3-3: hold the size/position animation for up to hold_ms. Release today is the cap only; mesh-ready release comes with S5 prep.
+    void hold(const PHLWINDOW& w) {
+        if (cfgHoldMs->value() <= 0)
+            return;
+        std::string why;
+        if (Hold::begin(w, Hold::Clock::now(), std::chrono::milliseconds{cfgHoldMs->value()}, why))
+            log(std::format("hold {} ms: size {} -> {}", cfgHoldMs->value(), w->sizeAnimation()->value(), w->sizeAnimation()->goal()));
+        else
+            log("no hold: " + why);
     }
 
     // source: which hook noticed the goal change first ("precommit" = the client answered before any frame; capture-timing evidence).
@@ -73,18 +89,21 @@ namespace {
             return;
         }
         if (t.transition) {
-            if (!t.transition->beginGeneration(goal))
+            if (!t.transition->beginGeneration(goal)) {
                 detach(t, t.transition->m_failure);
-            return;
+                return;
+            }
+        } else {
+            auto transition = makeUnique<CResizeTransition>(w);
+            if (!transition->beginGeneration(goal)) {
+                log("native drawing: " + transition->m_failure);
+                return;
+            }
+            t.transition = transition.get();
+            w->m_transformers.emplace_back(std::move(transition));
+            g_pHyprRenderer->damageWindow(w);
         }
-        auto transition = makeUnique<CResizeTransition>(w);
-        if (!transition->beginGeneration(goal)) {
-            log("native drawing: " + transition->m_failure);
-            return;
-        }
-        t.transition = transition.get();
-        w->m_transformers.emplace_back(std::move(transition));
-        g_pHyprRenderer->damageWindow(w);
+        hold(w);
     }
 
     void attachSurface(STracked& t, PHLWINDOW w) {
@@ -139,7 +158,7 @@ namespace {
             }
             if (w->m_monitor.lock() != monitor)
                 continue;
-            if (!t->transition->prepareFrame(config)) {
+            if (!t->transition->prepareFrame(config, Hold::held(w, Hold::Clock::now()))) {
                 detach(*t, t->transition->m_failure.empty() ? "transition done" : t->transition->m_failure);
                 continue;
             }
@@ -171,9 +190,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:new_buffer_timeout_ms",
                                                                   "After the size animation ends, ms to keep the scaled old snapshot while waiting for the new-size buffer",
                                                                   300, Config::Values::SIntValueOptions{.min = 0});
-    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs)})
+    // 200 ms: D3-3 cap chosen by the user; readiness 75-160 ms + prep ~92 ms often exceeds it. 0 = no hold.
+    cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:hold_ms",
+                                                      "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 200,
+                                                      Config::Values::SIntValueOptions{.min = 0});
+    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
+                              SP<Config::Values::IValue>(cfgHoldMs)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
             throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
+
+    if (std::string error; !Hold::init(error))
+        log("animation hold disabled: " + error);
 
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
@@ -184,6 +211,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
 
 APICALL EXPORT void PLUGIN_EXIT() {
     preChecksListener = nullptr;
+    const auto& c = Hold::counters();
+    log(std::format("hold counters: holds {} retargets {} released_early {} refused_spent {} refused_spring {} refused_idle {} adopted {} stale_dropped {}",
+                    c.holds, c.retargets, c.releasedEarly, c.refusedSpent, c.refusedSpring, c.refusedIdle, c.adopted, c.staleDropped));
+    Hold::exit();
     // Transformers' vtables live in this .so: every attached one must leave its window before unload.
     if (const auto gl = g_pHyprRenderer->glBackend())
         gl->makeEGLCurrent();

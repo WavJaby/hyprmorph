@@ -134,7 +134,7 @@ bool CResizeTransition::beginGeneration(const Vector2D& goalSize) {
     return true;
 }
 
-bool CResizeTransition::prepareFrame(const STransitionConfig& config) {
+bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held) {
     const auto window = m_window.lock();
     if (!window || !window->m_isMapped) {
         m_failure = "window gone";
@@ -144,7 +144,7 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config) {
 
     // ackedSize lands in m_current with the first commit after ack_configure (CWindow::onAck). That buffer can still be a client-side
     // transitional frame (kitty: old cells at top-left, rest blank) -- content readiness, not detected here (S3).
-    if (!m_newReady) {
+    if (!m_newReady && !held) {
         const auto surface = window->resource();
         if (surface && surface->m_current.ackedSize == m_targetAck) {
             m_newReady = true;
