@@ -48,7 +48,8 @@ namespace {
         Log::logger->log(Log::DEBUG, "[resize-transition] {}", msg);
     }
 
-    void detach(STracked& t, const std::string& reason) {
+    // reason by value: callers pass t.transition->m_failure, which the erase below destroys before the log line is built.
+    void detach(STracked& t, std::string reason) {
         if (!t.transition)
             return;
         if (const auto w = t.window.lock()) {
