@@ -64,6 +64,17 @@ struct Policy {
     // traces: post-acceptance changes under the adopted rule reach at most 4.0 % (Discord animated profile background); new-size frames vs
     // the settled frame leave no value in 12.1-24.9 % above that; .174 = geometric midpoint of that empty interval. The gate fails if they drift.
     double revokeEdgeDisagreement = .174;
+    // D5-1 placeholder: a protocol-updated frame that still matches an old-image alias (old content at its old place) does not start the
+    // confirm window. 0 = rule off. Inert without aliases. Set by readiness_rules_gate.py --placeholder-sweep on 330 recorded resizes:
+    // wait 350 = vesktop's longest placeholder life (~276 ms) + ~25 %; no recorded trial reached it, so the static (anchored) path is ungated.
+    // After a placeholder the next frame confirms over 20 ms: 0 / 20 / 40 / 60 gave vesktop 237 / 245 / 267 / 287 ms and Chrome 93 / 96 /
+    // 114 / 132 ms, all with 0 revocations and 0 accepted-then-changed; 20 keeps 8 ms of margin over 0.
+    double placeholderWaitMs = 350.;
+    double placeholderConfirmMs = 20.;
+    // Placeholder = changed-pixel fraction against some old alias below this. Not the update_* pair (built for "has left the old image";
+    // vesktop placeholders sit at 1.1-1.2 %, just above update_fraction). Derived on 2024 recorded new-size frames: frames a later frame
+    // changes by >= revokeEdgeDisagreement reach at most 9.4 %, frames that stay start at 20.6 %; .139 = geometric midpoint of that gap.
+    double placeholderChangedFraction = .139;
 
     // key=value overrides with the Python field names (quiet_ms, edge_disagreement, ...). Returns false on an unknown key or bad value.
     bool set(const std::string& key, const std::string& value);
@@ -116,6 +127,8 @@ struct Observation {
     std::optional<double> quietSinceMs;
     int quietSamples = 0;
     bool ready = false, newlyReady = false, revoked = false, expired = false;
+    bool placeholder = false;  // D5-1: this frame matched an old-image alias while the rule was waiting for a different frame
+    bool anchored = false;     // D5-1: the placeholder outlived the wait limit -> static layout, content stays in place, no mesh needed
     int generation = 0;  // candidate generation: bumps whenever the confirm window restarts
     std::optional<double> firstUpdateMs, readyMs;
     double analysisMs = 0;  // features + comparisons of this call, CPU wall time
@@ -144,6 +157,8 @@ private:
     std::optional<double> previousMs_, quietSinceMs_, updateMs_, readyMs_;
     int quietSamples_ = 0, generation_ = 0;
     bool updateEvidence_ = false;
+    bool placeholderPhase_ = true, afterPlaceholder_ = false, anchored_ = false;  // D5-1
+    std::optional<double> placeholderSinceMs_;
 };
 
 } // namespace readiness

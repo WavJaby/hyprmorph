@@ -285,12 +285,39 @@ Observation Detector::observe(const Image& frame, double elapsedMs, const Eviden
     }
     o.updateEvidenceReused = reuse;
     if (targetGeometry && o.updated) updateEvidence_ = true;
+    // D5-1: while no different frame has been seen, a protocol-updated frame equal to an old alias is a placeholder. Needs aliases; without
+    // them (or with the rule off) nothing changes.
+    bool placeholderBlocks = false, justAnchored = false;
+    if (policy_.placeholderWaitMs > 0 && placeholderPhase_ && o.protocolUpdate && !aliases_.empty()) {
+        if (o.aliasDifferences.empty())
+            for (const auto& alias : aliases_) o.aliasDifferences.push_back(aliasDifference(color, alias, policy_));
+        const bool matchesAlias = std::any_of(o.aliasDifferences.begin(), o.aliasDifferences.end(), [&](const auto& d) {
+            return d.changedFraction < policy_.placeholderChangedFraction;
+        });
+        if (matchesAlias) {
+            o.placeholder = true;
+            if (!placeholderSinceMs_) placeholderSinceMs_ = elapsedMs;
+            if (elapsedMs - *placeholderSinceMs_ < policy_.placeholderWaitMs) placeholderBlocks = true;
+            else {
+                // Unchanged for the whole wait: final frame of a static layout. It has been quiet since it appeared, so it may select now.
+                placeholderPhase_ = false;
+                anchored_ = true;
+                justAnchored = true;
+                anchor_ = current;
+                quietSinceMs_ = placeholderSinceMs_;
+                quietSamples_ = policy_.minimumConfirmObservations;
+            }
+        } else {
+            placeholderPhase_ = false;
+            afterPlaceholder_ = placeholderSinceMs_.has_value();
+        }
+    }
     const bool consecutive = !previousMs_ || elapsedMs - *previousMs_ <= policy_.maximumSampleGapMs;
     if (previous_) o.previous = compare(current, *previous_, policy_);
     if (anchor_) o.anchor = compare(current, *anchor_, policy_);
     const bool changed = o.previous && !quiet(*o.previous, policy_);
     o.supported = current.edgePixels() >= policy_.minimumEdgePixels;
-    const bool eligible = targetGeometry && o.updated && o.supported;
+    const bool eligible = targetGeometry && o.updated && o.supported && !placeholderBlocks;
     const bool layoutMode = policy_.postAcceptance == PostAcceptance::LayoutChange;
     if (layoutMode) {
         // The anchor is the selected frame while ready, so this is the change against what the mesh was built from.
@@ -304,6 +331,8 @@ Observation Detector::observe(const Image& frame, double elapsedMs, const Eviden
         anchor_.reset(); quietSinceMs_.reset(); quietSamples_ = 0;
     } else if (layoutMode && readyMs_) {
         ++quietSamples_;  // still ready: smaller changes neither revoke nor move the anchor off the selected frame
+    } else if (justAnchored) {
+        ++quietSamples_;  // placeholder just accepted as static: keep the window that started when it appeared
     } else if (!anchor_ || !consecutive || changed || !quiet(*o.anchor, policy_)) {
         anchor_ = current;
         quietSinceMs_ = elapsedMs;
@@ -313,7 +342,8 @@ Observation Detector::observe(const Image& frame, double elapsedMs, const Eviden
     } else {
         ++quietSamples_;
     }
-    const bool stable = eligible && quietSinceMs_ && elapsedMs - *quietSinceMs_ >= policy_.confirmMs && quietSamples_ >= policy_.minimumConfirmObservations;
+    const double confirmMs = afterPlaceholder_ ? policy_.placeholderConfirmMs : policy_.confirmMs;
+    const bool stable = eligible && quietSinceMs_ && elapsedMs - *quietSinceMs_ >= confirmMs && quietSamples_ >= policy_.minimumConfirmObservations;
     o.newlyReady = stable && !readyMs_ && elapsedMs <= policy_.maximumWaitMs;
     if (o.newlyReady) {
         readyMs_ = elapsedMs;
@@ -325,6 +355,7 @@ Observation Detector::observe(const Image& frame, double elapsedMs, const Eviden
     o.quietSinceMs = quietSinceMs_;
     o.quietSamples = quietSamples_;
     o.ready = readyMs_.has_value();
+    o.anchored = anchored_;
     o.generation = generation_;
     o.firstUpdateMs = updateMs_;
     o.readyMs = readyMs_;
@@ -359,7 +390,8 @@ bool Policy::set(const std::string& key, const std::string& value) {
         {"blur_sigma", &blurSigma}, {"gradient_threshold", &gradientThreshold}, {"gradient_dominance", &gradientDominance},
         {"minimum_line_fraction", &minimumLineFraction}, {"edge_disagreement", &edgeDisagreement},
         {"tile_disagreement", &cellDisagreement}, {"minimum_stable_regions", &minimumStableCells},
-        {"revoke_edge_disagreement", &revokeEdgeDisagreement}};
+        {"revoke_edge_disagreement", &revokeEdgeDisagreement}, {"placeholder_wait_ms", &placeholderWaitMs},
+        {"placeholder_quiet_ms", &placeholderConfirmMs}, {"placeholder_fraction", &placeholderChangedFraction}};
     const std::map<std::string, int*> ints{
         {"minimum_quiet_samples", &minimumConfirmObservations}, {"minimum_line_pixels", &minimumLinePixels}, {"border_pixels", &borderPixels},
         {"minimum_edge_pixels", &minimumEdgePixels}, {"edge_tolerance_pixels", &edgeTolerancePixels}, {"grid_rows", &gridRows},
@@ -386,7 +418,9 @@ std::string Policy::describe() const {
       << ", \"minimum_cell_support\": " << minimumCellSupport << ", \"edge_disagreement\": " << edgeDisagreement
       << ", \"tile_disagreement\": " << cellDisagreement << ", \"minimum_stable_regions\": " << minimumStableCells
       << ", \"protocol_update_evidence\": " << protocolUpdateEvidence << ", \"post_acceptance\": \""
-      << (postAcceptance == PostAcceptance::Strict ? "strict" : "layout_change") << "\", \"revoke_edge_disagreement\": " << revokeEdgeDisagreement << "}";
+      << (postAcceptance == PostAcceptance::Strict ? "strict" : "layout_change") << "\", \"revoke_edge_disagreement\": " << revokeEdgeDisagreement
+      << ", \"placeholder_wait_ms\": " << placeholderWaitMs << ", \"placeholder_quiet_ms\": " << placeholderConfirmMs
+      << ", \"placeholder_fraction\": " << placeholderChangedFraction << "}";
     return o.str();
 }
 
