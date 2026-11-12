@@ -6,8 +6,12 @@
 // run inside renderMonitor. So the goal is checked (and the old snapshot captured) at the two points that precede any texture replacement
 // and run outside a render pass: the window surface's precommit, and render.preChecks of every monitor.
 // Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
-// Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread; today it only logs decisions.
+// Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread.
+// Prep (S5): each readiness selection sends the old snapshot and the current new content, at analysis resolution, to the out-of-process
+// prep worker (D1-1); its answer releases the hold. The mesh itself is not drawn yet: the Presenter still plain-scales.
 #include "Hold.hpp"
+#include "Prep.hpp"
+#include "Readback.hpp"
 #include "Readiness.hpp"
 #include "Thumbnail.hpp"
 #include "Transition.hpp"
@@ -25,6 +29,7 @@
 #include <hyprland/src/render/Renderer.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -38,6 +43,7 @@ namespace {
     SP<Config::Values::CIntValue>  cfgHoldMs;
     SP<Config::Values::CBoolValue>   cfgReadiness;
     SP<Config::Values::CStringValue> cfgReadinessDump;
+    SP<Config::Values::CStringValue> cfgPrepWorker;
 
     struct STracked {
         PHLWINDOWREF               window;
@@ -47,11 +53,34 @@ namespace {
         CHyprSignalListener        precommit, commit;
         // Readiness bookkeeping: main-surface commits are what makes a thumbnail fresh (desynced subsurfaces are captured but not counted).
         uint64_t                   generation = 0, commits = 0, notedCommits = 0, sampledCommits = UINT64_MAX, aliasGeneration = 0;
+        // Prep bookkeeping: selection counts this generation's readiness selections and revocations, so an answer for an earlier
+        // selection is recognised as stale; stageWanted = a selection whose analysis readbacks found no free slot yet.
+        uint64_t                   resizeNs = 0;
+        uint32_t                   selection = 0;
+        bool                       stageWanted = false;
     };
     // unique_ptr: precommit lambdas hold STracked*, which must survive vector growth.
     std::vector<std::unique_ptr<STracked>> tracked;
 
     CHyprSignalListener preChecksListener;
+
+    // Analysis images for the prep worker: content downsampled by ANALYSIS_DIVISOR, the 1/4 device px the prep pipeline and its acceptance
+    // gates were built at. 4 slots = old + new image of two windows in flight; further windows of one relayout retry on the next frame.
+    constexpr int   ANALYSIS_DIVISOR = 4;
+    Readback::CPool analysisPool{4, 0, 0};
+    // A selection whose two readbacks are in flight; newTicket is the later one, so the pair is complete when it arrives.
+    struct SStaged {
+        uint64_t     window = 0, generation = 0, oldTicket = 0, newTicket = 0;
+        uint32_t     selection = 0;
+        Prep::SImage oldImage, newImage;
+    };
+    std::vector<SStaged> staged;
+
+    // stale = answers for a superseded generation or selection; inHold / afterHold = usable answers by whether the hold was still on.
+    struct SPrepCounters {
+        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, inHold = 0, afterHold = 0;
+    } prepCounts;
+    std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
     // Compositor-thread cost of onPreChecks on frames where a transition was attached (capture + thumbnail submit/poll), ms. Logged at unload.
     std::vector<double> preChecksMs;
@@ -86,7 +115,7 @@ namespace {
             log("native drawing: " + reason);
     }
 
-    // D3-3: hold the size/position animation for up to hold_ms. Release today is the cap only; mesh-ready release comes with S5 prep.
+    // D3-3: hold the size/position animation for up to hold_ms; a usable prep answer releases it earlier (onPrepAnswers).
     void hold(const PHLWINDOW& w) {
         if (cfgHoldMs->value() <= 0)
             return;
@@ -126,8 +155,11 @@ namespace {
         hold(w);
         ++t.generation;
         t.sampledCommits = UINT64_MAX;
+        t.resizeNs       = nowNs();
+        t.selection      = 0;
+        t.stageWanted    = false;
         auto dump        = cfgReadinessDump->value();
-        Readiness::beginGeneration(windowId(w), t.generation, nowNs(), dump == "[[EMPTY]]" ? "" : dump);
+        Readiness::beginGeneration(windowId(w), t.generation, t.resizeNs, dump == "[[EMPTY]]" ? "" : dump);
     }
 
     void attachSurface(STracked& t, PHLWINDOW w) {
@@ -214,21 +246,142 @@ namespace {
             log(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
     }
 
-    void logReadiness() {
+    STracked* findTracked(uint64_t id) {
+        for (auto& t : tracked)
+            if (const auto w = t->window.lock(); w && windowId(w) == id)
+                return t.get();
+        return nullptr;
+    }
+
+    // Starts the two analysis readbacks of the current selection. false -> no free readback slot: stageWanted stays set, next frame retries.
+    bool stage(STracked& t, const PHLWINDOW& w) {
+        t.stageWanted       = false;
+        const auto* content = t.transition->newContent();
+        const auto& old     = t.transition->oldContent();
+        const auto  oldTex  = old.fb ? old.fb->getTexture() : nullptr;
+        const auto  newTex  = content ? content->fb->getTexture() : nullptr;
+        if (!oldTex || !newTex)
+            return true;
+        // Whole analysis pixels only: the box filter is exact at an integer ratio, at the cost of < ANALYSIS_DIVISOR device px at the
+        // right and bottom edges. The worker refuses images under 2 px a side.
+        const auto extent = [](const Vector2D& px) { return Vector2D{std::floor(px.x / ANALYSIS_DIVISOR), std::floor(px.y / ANALYSIS_DIVISOR)}; };
+        const auto oldSize = extent(old.contentPx), newSize = extent(content->contentPx);
+        if (std::min({oldSize.x, oldSize.y, newSize.x, newSize.y}) < 2) {
+            ++prepCounts.tooSmall;
+            return true;
+        }
+        const auto submit = [](const CResizeTransition::SSnapshot& snap, unsigned texture, const Vector2D& size) {
+            return analysisPool.submit(texture, 0.F, 0.F, size.x * ANALYSIS_DIVISOR / snap.fb->m_size.x, size.y * ANALYSIS_DIVISOR / snap.fb->m_size.y,
+                                       static_cast<int>(size.x), static_cast<int>(size.y));
+        };
+        const bool room      = analysisPool.reserve(static_cast<int>(std::max(oldSize.x, newSize.x)), static_cast<int>(std::max(oldSize.y, newSize.y)));
+        const auto oldTicket = room ? submit(old, oldTex->m_texID, oldSize) : 0;
+        const auto newTicket = oldTicket ? submit(*content, newTex->m_texID, newSize) : 0;
+        if (!newTicket) { // a lone old readback completes into no staged entry and is dropped
+            if (*analysisPool.failure())
+                log(std::string{"prep images disabled: "} + analysisPool.failure());
+            else {
+                t.stageWanted = true;
+                ++prepCounts.stageRetries;
+            }
+            return false;
+        }
+        staged.push_back({.window = windowId(w), .generation = t.generation, .oldTicket = oldTicket, .newTicket = newTicket, .selection = t.selection, .oldImage = {}, .newImage = {}});
+        ++prepCounts.staged;
+        return true;
+    }
+
+    // Scheduler: a selection asks the prep worker for a mesh; a revocation invalidates whatever was asked so far.
+    void onReadinessEvents() {
         for (const auto& e : Readiness::drain()) {
+            auto* const t       = findTracked(e.window);
+            const bool  current = t && t->transition && t->generation == e.generation;
             switch (e.kind) {
-                case Readiness::SEvent::SELECTED: log(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::SELECTED:
+                    log(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs));
+                    if (current) {
+                        ++t->selection;
+                        stage(*t, t->window.lock());
+                    }
+                    break;
                 case Readiness::SEvent::VETOED: log(std::format("readiness 0x{:x} gen {}: selection vetoed at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
-                case Readiness::SEvent::REVOKED: log(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::REVOKED:
+                    log(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs));
+                    if (current) {
+                        ++t->selection;
+                        t->stageWanted = false;
+                    }
+                    break;
                 case Readiness::SEvent::SUMMARY: log("readiness summary " + e.text); break;
                 case Readiness::SEvent::ERROR: log("readiness error: " + e.text); break;
             }
         }
     }
 
+    // Finished analysis readbacks -> one prep request per selection that is still the window's current one.
+    void sendStaged() {
+        analysisPool.poll([](uint64_t ticket, int width, int height, std::vector<uint8_t>&& rgba) {
+            // Tickets complete in order: an entry still waiting for an earlier ticket lost that readback.
+            std::erase_if(staged, [&](const SStaged& s) { return s.newTicket < ticket; });
+            const auto s = std::ranges::find_if(staged, [&](const SStaged& s) { return s.oldTicket == ticket || s.newTicket == ticket; });
+            if (s == staged.end())
+                return;
+            (s->oldTicket == ticket ? s->oldImage : s->newImage) = Prep::SImage{width, height, std::move(rgba)};
+            if (s->newTicket != ticket)
+                return;
+            const auto* t = findTracked(s->window);
+            if (!s->oldImage.rgba.empty() && t && t->transition && t->generation == s->generation && t->selection == s->selection)
+                Prep::request({s->window, s->generation, s->selection, std::move(s->oldImage), std::move(s->newImage)});
+            else
+                ++prepCounts.stale;
+            staged.erase(s);
+        });
+    }
+
+    // D3-3: the hold ends on mesh ready. Until the Presenter draws the mesh this only shortens the hold.
+    void onPrepAnswers() {
+        if (const auto failure = Prep::takeFailure())
+            log("prep worker down, plain scale from here: " + *failure);
+        for (const auto& a : Prep::drain()) {
+            const auto* t = findTracked(a.window);
+            if (!t || !t->transition || t->generation != a.generation || t->selection != a.selection) {
+                ++prepCounts.stale;
+                continue;
+            }
+            if (!a.ok) {
+                log(std::format("prep 0x{:x} gen {} selection {}: refused: {}", a.window, a.generation, a.selection, a.refusal));
+                continue;
+            }
+            const auto w      = t->window.lock();
+            const auto now    = Hold::Clock::now();
+            const bool held   = Hold::held(w, now);
+            const auto readyMs = (nowNs() - t->resizeNs) / 1e6;
+            Hold::release(w, now);
+            ++(held ? prepCounts.inHold : prepCounts.afterHold);
+            meshReadyMs.push_back(readyMs);
+            log(std::format("prep 0x{:x} gen {} selection {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}", a.window,
+                            a.generation, a.selection, readyMs, a.leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over"));
+        }
+    }
+
+    // Worker path: the config value, or the build's default when empty. A changed value restarts the worker.
+    void syncPrepWorker() {
+        auto path = cfgPrepWorker->value();
+        if (path.empty() || path == "[[EMPTY]]")
+            path = PREP_WORKER_DEFAULT;
+        if (path == Prep::workerPath())
+            return;
+        std::string error;
+        const auto  started = std::chrono::steady_clock::now();
+        const bool  ok      = Prep::start(path, error);
+        const auto  ms      = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        log(ok ? std::format("prep worker started in {:.1f} ms: {}", ms, path) : "no prep worker, plain scale only: " + error);
+    }
+
     void onPreChecks(PHLMONITOR monitor) {
         const auto started = std::chrono::steady_clock::now();
         bool       active  = false;
+        syncPrepWorker();
         syncWindows();
 
         const STransitionConfig config{.crossfadeMs = cfgCrossfadeMs->value(), .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value()};
@@ -248,6 +401,8 @@ namespace {
                 continue;
             }
             sample(*t, w);
+            if (t->stageWanted)
+                stage(*t, w);
             // Hyprland stops damaging the window when the size animation ends, but the crossfade, the new-buffer timeout and the final
             // "done" check all run in prepareFrame: keep one frame queued per frame while attached.
             g_pEventLoopManager->doLater([ref = t->window] {
@@ -258,7 +413,9 @@ namespace {
         if (const auto gl = g_pHyprRenderer->glBackend())
             gl->makeEGLCurrent();
         Thumbnail::poll([](Thumbnail::SFrame&& frame) { Readiness::submit(std::move(frame)); });
-        logReadiness();
+        onReadinessEvents();
+        sendStaged();
+        onPrepAnswers();
         if (active)
             preChecksMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }
@@ -289,14 +446,19 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:readiness", "Sample new content and run the readiness detector (0 = off)", true);
     cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
                                                                 "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
+    cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
+                                                                "Path of the prep-worker executable the plugin runs (empty = the path it was built with)", "");
     for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
-                              SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump)})
+                              SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
+                              SP<Config::Values::IValue>(cfgPrepWorker)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
             throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
 
     if (std::string error; !Hold::init(error))
         log("animation hold disabled: " + error);
     Readiness::start({});
+    // At load, not at the first resize: the worker needs 0.5-2 s (context, kernels, warm-up) before its first answer is fast.
+    syncPrepWorker();
 
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
@@ -319,7 +481,21 @@ APICALL EXPORT void PLUGIN_EXIT() {
     tracked.clear();
     // The worker runs this library's code: join before unmap. Summaries of the generations closed above are logged here.
     Readiness::stop();
-    logReadiness();
+    onReadinessEvents();
+    Prep::stop();
+    const auto pc = Prep::counters();
+    log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} in_hold {} after_hold {}",
+                    prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
+                    prepCounts.inHold, prepCounts.afterHold));
+    if (!meshReadyMs.empty()) {
+        std::ranges::sort(meshReadyMs);
+        log(std::format("mesh ready ms after resize over {} answers: min {:.1f} median {:.1f} max {:.1f}", meshReadyMs.size(), meshReadyMs.front(),
+                        meshReadyMs[meshReadyMs.size() / 2], meshReadyMs.back()));
+    }
+    const auto& ac = analysisPool.counters();
+    log(std::format("analysis readback counters: submitted {} busy {} completed {} gl_errors {}", ac.submitted, ac.busy, ac.completed, ac.glErrors));
+    analysisPool.destroy();
+    staged.clear();
     if (!preChecksMs.empty()) {
         std::ranges::sort(preChecksMs);
         const auto at = [](double q) { return preChecksMs[std::min(preChecksMs.size() - 1, size_t(q * preChecksMs.size()))]; };

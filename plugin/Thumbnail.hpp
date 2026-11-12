@@ -1,8 +1,9 @@
-// GPU thumbnails for readiness (FrameSource seam, M1): a compute shader box-downsamples a texture region to WIDTH px wide, read back through a
-// small pool of fenced PBOs so the compositor never waits on the GPU. Same filter as the S3 sampler (experiments/native_readiness_sampler.cpp,
-// 4x4 bilinear taps per output pixel), whose thumbnails the readiness thresholds were derived from.
+// Readiness thumbnails (FrameSource seam, M1): a texture region downsampled to WIDTH px wide through Readback, tagged with the generation
+// and commit it shows. Same filter as the S3 sampler, whose thumbnails the readiness thresholds were derived from.
 // All calls need the compositor's EGL context current and run on the compositor thread.
 #pragma once
+
+#include "Readback.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -33,9 +34,6 @@ namespace Thumbnail {
     void poll(const std::function<void(SFrame&&)>& done);
     void destroy();
 
-    struct SCounters {
-        unsigned long submitted = 0, busy = 0, completed = 0, glErrors = 0;
-    };
-    const SCounters&   counters();
-    const char*        failure(); // empty while working
+    const Readback::SCounters& counters();
+    const char*                failure(); // empty while working
 }
