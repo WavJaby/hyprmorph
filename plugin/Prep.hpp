@@ -19,15 +19,15 @@ namespace Prep {
         int                  width = 0, height = 0;
         std::vector<uint8_t> rgba;
     };
-    // (window, generation, selection) identify the readiness selection the images belong to and come back with the answer.
+    // (window, generation, candidate) identify the readiness candidate the images belong to and come back with the answer.
     struct SRequest {
         uint64_t window = 0, generation = 0;
-        uint32_t selection = 0;
+        uint32_t candidate = 0;
         SImage   oldImage, newImage;
     };
     struct SAnswer {
         uint64_t    window = 0, generation = 0;
-        uint32_t    selection = 0;
+        uint32_t    candidate = 0;
         bool        ok = false;
         std::string refusal;         // worker's reason when !ok
         std::vector<prep::Leaf> leaves; // the mesh: regions in analysis px of the two request images

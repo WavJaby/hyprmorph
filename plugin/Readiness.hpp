@@ -28,8 +28,11 @@ namespace Readiness {
     void submit(Thumbnail::SFrame&& frame); // geometry/new-buffer evidence is implied: only frames acked at the target size are sampled
 
     struct SEvent {
-        enum EKind { SELECTED, VETOED, REVOKED, SUMMARY, ERROR } kind;
+        // CANDIDATE: a frame opened a confirm window -- the layout a SELECTED with the same candidate id will confirm, unless a change
+        // restarts the window first (a new CANDIDATE). Lets the scheduler prepare the mesh while the detector is still confirming.
+        enum EKind { CANDIDATE, SELECTED, VETOED, REVOKED, SUMMARY, ERROR } kind;
         uint64_t    window = 0, generation = 0;
+        uint32_t    candidate = 0; // CANDIDATE, SELECTED: the detector's confirm-window counter, > 0
         double      elapsedMs = 0;
         std::string text; // SUMMARY: one JSON object; ERROR: reason
     };

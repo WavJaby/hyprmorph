@@ -53,7 +53,7 @@ namespace {
         wire::RequestHeader header;
         header.generation = q.request.generation;
         header.window     = q.request.window;
-        header.selection  = q.request.selection;
+        header.candidate  = q.request.candidate;
         header.oldImage   = describe(q.request.oldImage);
         header.newImage   = describe(q.request.newImage);
         int fds[2]        = {-1, -1};
@@ -89,7 +89,7 @@ namespace {
         Prep::SAnswer answer;
         answer.window     = response.window;
         answer.generation = response.generation;
-        answer.selection  = response.selection;
+        answer.candidate  = response.candidate;
         answer.ok         = response.status == wire::Status::Ok;
         answer.prepMs = response.prepMs;
         if (!text.empty()) {

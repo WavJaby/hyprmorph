@@ -50,6 +50,7 @@ namespace {
         std::ofstream                      manifest;
         int                                dumped = 0;
         std::optional<Thumbnail::SFrame>   aliasRegion; // D5-1: old content's shared region; the detector is built at the first frame
+        int                                candidate = 0; // last confirm window announced: Observation::generation + 1, so 0 = none yet
     };
 
     Readiness::SConfig              config;
@@ -72,7 +73,7 @@ namespace {
         if (g.manifest.is_open())
             g.manifest << std::format("# decision {} {:.3f}\n", kind == Readiness::SEvent::SELECTED ? "select" : kind == Readiness::SEvent::VETOED ? "veto" : "revoke",
                                       elapsedMs);
-        emit({.kind = kind, .window = g.window, .generation = g.generation, .elapsedMs = elapsedMs, .text = {}});
+        emit({.kind = kind, .window = g.window, .generation = g.generation, .candidate = static_cast<uint32_t>(g.candidate), .elapsedMs = elapsedMs, .text = {}});
     }
 
     void close(SGeneration& g) {
@@ -203,6 +204,15 @@ namespace {
         if (o.revoked) {
             ++g.revocations;
             decide(g, Readiness::SEvent::REVOKED, elapsedMs);
+        }
+        // After a revocation, so the scheduler drops the old mesh before it hears of the frame that replaced it.
+        // A static layout is selected out of the placeholder wait with no confirm window of its own: it keeps the id it has, 1 if none
+        // was ever opened, and the scheduler asks for its mesh at the selection.
+        if ((o.quietSinceMs && o.generation + 1 != g.candidate) || (o.newlyReady && !g.candidate)) {
+            g.candidate = o.generation + 1;
+            if (!o.newlyReady)
+                emit({.kind = Readiness::SEvent::CANDIDATE, .window = g.window, .generation = g.generation, .candidate = static_cast<uint32_t>(g.candidate),
+                      .elapsedMs = elapsedMs, .text = {}});
         }
         bool vetoed = false;
         if (o.newlyReady) {

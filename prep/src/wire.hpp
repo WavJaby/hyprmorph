@@ -10,7 +10,7 @@
 // Response = one packet: ResponseHeader + 1 fd (memfd holding a UTF-8 JSON payload of payloadBytes), or 0 fds when payloadBytes == 0.
 //            Payload: {"generation", "status": "ok"|"refused", "reason", "leaves": [...same shape as
 //            results/acceptance/<label>/<case>/selected-regions.json...], "splits": [...], "timings_ms": {...}, "prep_ms", "evidence": {...}}.
-// The header repeats window + generation + selection + status so a client can drop a stale or refused answer without reading the payload.
+// The header repeats window + generation + candidate + status so a client can drop a stale or refused answer without reading the payload.
 // Requests are served in order, one at a time; a client that already started a newer request for the same window simply ignores older
 // answers (the worker does not cancel).
 #include <cstddef>
@@ -42,7 +42,7 @@ struct RequestHeader {
     uint64_t generation = 0;  // per-window resize generation (D1-7), echoed back
     uint64_t window = 0;      // window id (address), echoed back; the worker keeps no per-window state
     ImageDesc oldImage, newImage;
-    uint32_t selection = 0;   // readiness selection within the generation (a revoke + re-select asks again), echoed back
+    uint32_t candidate = 0;   // readiness candidate within the generation (each restart of the confirm window is a new one), echoed back
     uint32_t reserved[3] = {};
 };
 
@@ -56,7 +56,7 @@ struct ResponseHeader {
     Status status = Status::Ok;
     uint32_t payloadBytes = 0;
     double prepMs = 0;        // worker-side preparation time (excludes socket + payload encoding)
-    uint32_t selection = 0;
+    uint32_t candidate = 0;
     uint32_t reserved[3] = {};
 };
 

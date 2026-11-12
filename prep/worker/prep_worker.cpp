@@ -39,7 +39,7 @@ void respond(int client, const ipc::RequestHeader& request, ipc::Status status, 
     ipc::ResponseHeader header;
     header.generation = request.generation;
     header.window = request.window;
-    header.selection = request.selection;
+    header.candidate = request.candidate;
     header.status = status;
     header.prepMs = prepMs;
     std::string text = json::dump(payload);

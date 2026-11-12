@@ -7,8 +7,9 @@
 // and run outside a render pass: the window surface's precommit, and render.preChecks of every monitor.
 // Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
 // Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread.
-// Prep (S5): each readiness selection sends the old snapshot and the current new content, at analysis resolution, to the out-of-process
-// prep worker (D1-1); its answer releases the hold and, when it came before the box moved, becomes the mesh the Presenter draws.
+// Prep (S5): each readiness candidate -- a frame that opened a confirm window -- sends the old snapshot and the current new content, at
+// analysis resolution, to the out-of-process prep worker (D1-1), so the mesh is prepared while readiness confirms. Once the candidate is
+// selected and its answer is in, the hold is released and, if the box had not moved yet, the answer becomes the mesh the Presenter draws.
 #include "Hold.hpp"
 #include "Prep.hpp"
 #include "Presenter.hpp"
@@ -32,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -56,10 +58,15 @@ namespace {
         CHyprSignalListener        precommit, commit;
         // Readiness bookkeeping: main-surface commits are what makes a thumbnail fresh (desynced subsurfaces are captured but not counted).
         uint64_t                   generation = 0, commits = 0, notedCommits = 0, sampledCommits = UINT64_MAX, aliasGeneration = 0;
-        // Prep bookkeeping: selection counts this generation's readiness selections and revocations, so an answer for an earlier
-        // selection is recognised as stale; stageWanted = a selection whose analysis readbacks found no free slot yet.
+        // Prep bookkeeping, all per generation; candidate ids are the readiness detector's, 0 = none.
+        // candidate = newest one seen; asked = the one whose images or request are out (one at a time per window: a newer candidate waits
+        // for it, then is staged with the content of that moment); selected = the one readiness confirmed, cleared by a revocation;
+        // answer = the worker's result for `candidate`, kept until that candidate is selected; stageWanted = `candidate` still needs staging;
+        // staged = `candidate` has been staged (a selection that finds it unstaged asks then).
         uint64_t                   resizeNs = 0;
-        uint32_t                   selection = 0;
+        uint32_t                   candidate = 0, asked = 0, selected = 0;
+        bool                       candidateStaged = false;
+        std::optional<Prep::SAnswer> answer;
         bool                       stageWanted = false;
     };
     // unique_ptr: precommit lambdas hold STracked*, which must survive vector growth.
@@ -71,19 +78,19 @@ namespace {
     // gates were built at. 4 slots = old + new image of two windows in flight; further windows of one relayout retry on the next frame.
     constexpr int   ANALYSIS_DIVISOR = 4;
     Readback::CPool analysisPool{4, 0, 0};
-    // A selection whose two readbacks are in flight; newTicket is the later one, so the pair is complete when it arrives.
+    // A candidate whose two readbacks are in flight; newTicket is the later one, so the pair is complete when it arrives.
     struct SStaged {
         uint64_t     window = 0, generation = 0, oldTicket = 0, newTicket = 0;
-        uint32_t     selection = 0;
+        uint32_t     candidate = 0;
         Prep::SImage oldImage, newImage;
     };
     std::vector<SStaged> staged;
 
-    // stale = answers for a superseded generation or selection; inHold / afterHold = usable answers by whether the hold was still on;
-    // meshDrawn / meshLate = usable answers the transition took / refused because its box was already moving; meshRevoked = drawn
-    // meshes whose selection was revoked.
+    // stale = answers for a superseded generation or candidate (speculation that did not pay); early = usable answers that were in before
+    // their candidate was selected; inHold / afterHold = usable answers by whether the hold was still on; meshDrawn / meshLate = usable
+    // answers the transition took / refused because its box was already moving; meshRevoked = drawn meshes whose selection was revoked.
     struct SPrepCounters {
-        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshRevoked = 0;
+        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, early = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshRevoked = 0;
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
@@ -161,7 +168,9 @@ namespace {
         ++t.generation;
         t.sampledCommits = UINT64_MAX;
         t.resizeNs       = nowNs();
-        t.selection      = 0;
+        t.candidate = t.asked = t.selected = 0;
+        t.candidateStaged = false;
+        t.answer.reset();
         t.stageWanted    = false;
         auto dump        = cfgReadinessDump->value();
         Readiness::beginGeneration(windowId(w), t.generation, t.resizeNs, dump == "[[EMPTY]]" ? "" : dump);
@@ -258,22 +267,26 @@ namespace {
         return nullptr;
     }
 
-    // Starts the two analysis readbacks of the current selection. false -> no free readback slot: stageWanted stays set, next frame retries.
-    bool stage(STracked& t, const PHLWINDOW& w) {
-        t.stageWanted       = false;
+    // Starts the two analysis readbacks for the window's newest candidate, unless an earlier one is still out. A readback slot that is
+    // not free leaves stageWanted set: the next frame retries.
+    void stage(STracked& t, const PHLWINDOW& w) {
+        t.stageWanted = true;
+        if (t.asked)
+            return;
         const auto* content = t.transition->newContent();
         const auto& old     = t.transition->oldContent();
         const auto  oldTex  = old.fb ? old.fb->getTexture() : nullptr;
         const auto  newTex  = content ? content->fb->getTexture() : nullptr;
         if (!oldTex || !newTex)
-            return true;
+            return;
         // Whole analysis pixels only: the box filter is exact at an integer ratio, at the cost of < ANALYSIS_DIVISOR device px at the
         // right and bottom edges. The worker refuses images under 2 px a side.
         const auto extent = [](const Vector2D& px) { return Vector2D{std::floor(px.x / ANALYSIS_DIVISOR), std::floor(px.y / ANALYSIS_DIVISOR)}; };
         const auto oldSize = extent(old.contentPx), newSize = extent(content->contentPx);
         if (std::min({oldSize.x, oldSize.y, newSize.x, newSize.y}) < 2) {
             ++prepCounts.tooSmall;
-            return true;
+            t.stageWanted = false;
+            return;
         }
         const auto submit = [](const CResizeTransition::SSnapshot& snap, unsigned texture, const Vector2D& size) {
             return analysisPool.submit(texture, 0.F, 0.F, size.x * ANALYSIS_DIVISOR / snap.fb->m_size.x, size.y * ANALYSIS_DIVISOR / snap.fb->m_size.y,
@@ -283,38 +296,79 @@ namespace {
         const auto oldTicket = room ? submit(old, oldTex->m_texID, oldSize) : 0;
         const auto newTicket = oldTicket ? submit(*content, newTex->m_texID, newSize) : 0;
         if (!newTicket) { // a lone old readback completes into no staged entry and is dropped
-            if (*analysisPool.failure())
+            if (*analysisPool.failure()) {
                 log(std::string{"prep images disabled: "} + analysisPool.failure());
-            else {
-                t.stageWanted = true;
+                t.stageWanted = false;
+            } else
                 ++prepCounts.stageRetries;
-            }
-            return false;
+            return;
         }
-        staged.push_back({.window = windowId(w), .generation = t.generation, .oldTicket = oldTicket, .newTicket = newTicket, .selection = t.selection, .oldImage = {}, .newImage = {}});
+        staged.push_back({.window = windowId(w), .generation = t.generation, .oldTicket = oldTicket, .newTicket = newTicket, .candidate = t.candidate, .oldImage = {}, .newImage = {}});
+        t.asked           = t.candidate;
+        t.candidateStaged = true;
+        t.stageWanted     = false;
         ++prepCounts.staged;
-        return true;
     }
 
-    // Scheduler: a selection asks the prep worker for a mesh; a revocation invalidates whatever was asked so far.
+    // D3-3: the hold ends on mesh ready = the selected candidate's answer is in. The mesh is offered first, while the box is still held:
+    // released, it would be too late.
+    void useAnswer(STracked& t) {
+        auto       a = std::move(*t.answer);
+        t.answer.reset();
+        const auto w       = t.window.lock();
+        const auto now     = Hold::Clock::now();
+        const bool held    = Hold::held(w, now);
+        const auto readyMs = (nowNs() - t.resizeNs) / 1e6;
+        const auto leaves  = a.leaves.size();
+        const bool drawn   = cfgMesh->value() && t.transition->offerMesh({std::move(a.leaves),
+                                                                          {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
+                                                                          {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}});
+        Hold::release(w, now);
+        ++(held ? prepCounts.inHold : prepCounts.afterHold);
+        ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
+        meshReadyMs.push_back(readyMs);
+        log(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
+                        a.generation, a.candidate, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
+                        drawn ? "mesh drawn" : "plain scale"));
+    }
+
+    // A new candidate supersedes the one before: its answer is for a layout the client has left.
+    void wantCandidate(STracked& t, uint32_t candidate) {
+        if (candidate != t.candidate) {
+            t.candidate       = candidate;
+            t.candidateStaged = false;
+            t.answer.reset();
+        }
+        if (!t.candidateStaged)
+            stage(t, t.window.lock());
+    }
+
+    // Scheduler: a candidate asks the prep worker for a mesh, its selection lets the answer through, a revocation takes the mesh back.
     void onReadinessEvents() {
         for (const auto& e : Readiness::drain()) {
             auto* const t       = findTracked(e.window);
             const bool  current = t && t->transition && t->generation == e.generation;
             switch (e.kind) {
+                case Readiness::SEvent::CANDIDATE:
+                    if (current)
+                        wantCandidate(*t, e.candidate);
+                    break;
                 case Readiness::SEvent::SELECTED:
                     log(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs));
                     if (current) {
-                        ++t->selection;
-                        stage(*t, t->window.lock());
+                        wantCandidate(*t, e.candidate); // a selection whose candidate was never announced (static layout) is asked now
+                        t->selected = e.candidate;
+                        if (t->answer) {
+                            ++prepCounts.early;
+                            useAnswer(*t);
+                        }
                     }
                     break;
                 case Readiness::SEvent::VETOED: log(std::format("readiness 0x{:x} gen {}: selection vetoed at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
                 case Readiness::SEvent::REVOKED:
                     log(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs));
                     if (current) {
-                        ++t->selection;
-                        t->stageWanted = false;
+                        t->selected = 0;
                         if (t->transition->revokeMesh())
                             ++prepCounts.meshRevoked;
                     }
@@ -325,55 +379,64 @@ namespace {
         }
     }
 
-    // Finished analysis readbacks -> one prep request per selection that is still the window's current one.
+    // The candidate that was out is settled (answered, superseded, or its images were lost): the newest one may go next.
+    void settle(STracked& t, uint32_t candidate) {
+        if (t.asked != candidate)
+            return;
+        t.asked = 0;
+        if (t.candidate != candidate)
+            t.stageWanted = true;
+    }
+
+    // Finished analysis readbacks -> the prep request of the candidate they were staged for.
     void sendStaged() {
         analysisPool.poll([](uint64_t ticket, int width, int height, std::vector<uint8_t>&& rgba) {
             // Tickets complete in order: an entry still waiting for an earlier ticket lost that readback.
-            std::erase_if(staged, [&](const SStaged& s) { return s.newTicket < ticket; });
+            std::erase_if(staged, [&](const SStaged& s) {
+                if (s.newTicket >= ticket)
+                    return false;
+                if (auto* const t = findTracked(s.window); t && t->generation == s.generation) {
+                    settle(*t, s.candidate);
+                    t->stageWanted = true;
+                }
+                return true;
+            });
             const auto s = std::ranges::find_if(staged, [&](const SStaged& s) { return s.oldTicket == ticket || s.newTicket == ticket; });
             if (s == staged.end())
                 return;
             (s->oldTicket == ticket ? s->oldImage : s->newImage) = Prep::SImage{width, height, std::move(rgba)};
             if (s->newTicket != ticket)
                 return;
-            const auto* t = findTracked(s->window);
-            if (!s->oldImage.rgba.empty() && t && t->transition && t->generation == s->generation && t->selection == s->selection)
-                Prep::request({s->window, s->generation, s->selection, std::move(s->oldImage), std::move(s->newImage)});
+            // Sent even when a newer candidate has appeared meanwhile: its answer is what frees the window for the next one.
+            if (const auto* t = findTracked(s->window); !s->oldImage.rgba.empty() && t && t->transition && t->generation == s->generation)
+                Prep::request({s->window, s->generation, s->candidate, std::move(s->oldImage), std::move(s->newImage)});
             else
                 ++prepCounts.stale;
             staged.erase(s);
         });
     }
 
-    // D3-3: the hold ends on mesh ready. The mesh is offered first, while the box is still held: released, it would be too late.
     void onPrepAnswers() {
         if (const auto failure = Prep::takeFailure())
             log("prep worker down, plain scale from here: " + *failure);
         for (auto& a : Prep::drain()) {
-            const auto* t = findTracked(a.window);
-            if (!t || !t->transition || t->generation != a.generation || t->selection != a.selection) {
+            auto* const t = findTracked(a.window);
+            if (!t || !t->transition || t->generation != a.generation) {
+                ++prepCounts.stale;
+                continue;
+            }
+            settle(*t, a.candidate);
+            if (t->candidate != a.candidate) {
                 ++prepCounts.stale;
                 continue;
             }
             if (!a.ok) {
-                log(std::format("prep 0x{:x} gen {} selection {}: refused: {}", a.window, a.generation, a.selection, a.refusal));
+                log(std::format("prep 0x{:x} gen {} candidate {}: refused: {}", a.window, a.generation, a.candidate, a.refusal));
                 continue;
             }
-            const auto w      = t->window.lock();
-            const auto now    = Hold::Clock::now();
-            const bool held   = Hold::held(w, now);
-            const auto readyMs = (nowNs() - t->resizeNs) / 1e6;
-            const auto leaves  = a.leaves.size();
-            const bool drawn   = cfgMesh->value() && t->transition->offerMesh({std::move(a.leaves),
-                                                                               {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
-                                                                               {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}});
-            Hold::release(w, now);
-            ++(held ? prepCounts.inHold : prepCounts.afterHold);
-            ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
-            meshReadyMs.push_back(readyMs);
-            log(std::format("prep 0x{:x} gen {} selection {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}",
-                            a.window, a.generation, a.selection, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
-                            drawn ? "mesh drawn" : "plain scale"));
+            t->answer = std::move(a);
+            if (t->selected == t->candidate)
+                useAnswer(*t);
         }
     }
 
@@ -417,7 +480,7 @@ namespace {
                 continue;
             }
             sample(*t, w);
-            if (t->stageWanted)
+            if (t->stageWanted && !t->asked)
                 stage(*t, w);
             // Hyprland stops damaging the window when the size animation ends, but the crossfade, the new-buffer timeout and the final
             // "done" check all run in prepareFrame: keep one frame queued per frame while attached.
@@ -505,9 +568,9 @@ APICALL EXPORT void PLUGIN_EXIT() {
     onReadinessEvents();
     Prep::stop();
     const auto pc = Prep::counters();
-    log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} in_hold {} after_hold {}",
+    log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} early {} in_hold {} after_hold {}",
                     prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
-                    prepCounts.inHold, prepCounts.afterHold));
+                    prepCounts.early, prepCounts.inHold, prepCounts.afterHold));
     log(std::format("mesh counters: drawn {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshLate, prepCounts.meshRevoked));
     Presenter::destroy();
     if (!meshReadyMs.empty()) {
