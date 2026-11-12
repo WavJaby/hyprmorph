@@ -5,6 +5,8 @@
 // A dead worker is not restarted; it comes back with the next start() (plugin reload, or a changed worker path).
 #pragma once
 
+#include "../prep/src/types.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -28,7 +30,8 @@ namespace Prep {
         uint32_t    selection = 0;
         bool        ok = false;
         std::string refusal;         // worker's reason when !ok
-        size_t      leaves = 0;      // regions in the mesh payload
+        std::vector<prep::Leaf> leaves; // the mesh: regions in analysis px of the two request images
+        int         oldWidth = 0, oldHeight = 0, newWidth = 0, newHeight = 0; // those images' sizes
         double      prepMs = 0;      // worker-side preparation
         double      roundTripMs = 0; // request() -> answer parsed, incl. the wait behind earlier requests
     };

@@ -1,11 +1,14 @@
 #include "Transition.hpp"
 
+#include "Presenter.hpp"
+
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/protocols/XDGShell.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>
 #include <hyprland/src/render/pass/ClearPassElement.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 
@@ -132,6 +135,91 @@ bool CResizeTransition::beginGeneration(const Vector2D& goalSize) {
     m_switching = false;
     m_fade      = 0.F;
     m_animEnded = false;
+    m_mesh.reset();
+    m_moving    = false;
+    m_revoked   = false;
+    m_beginSize = m_window->sizeAnimation()->value();
+    m_goalSize  = goalSize;
+    m_progress  = 0;
+    return true;
+}
+
+bool CResizeTransition::offerMesh(SMesh&& mesh) {
+    if (m_moving || mesh.leaves.empty())
+        return false;
+    m_mesh    = std::move(mesh);
+    m_revoked = false;
+    return true;
+}
+
+bool CResizeTransition::revokeMesh() {
+    if (!m_mesh || m_revoked)
+        return false;
+    m_revoked   = true;
+    m_revokedAt = steady_clock::now();
+    return true;
+}
+
+// Presenter: old and new content through the mesh (or the degenerate one) at m_progress, summed by the fade, into m_composed.
+bool CResizeTransition::compose(const Vector2D& boxSize, float weight) {
+    const auto window  = m_window.lock();
+    const auto monitor = window->m_monitor.lock();
+    if (!monitor) {
+        m_failure = "no monitor";
+        return false;
+    }
+    if (!m_composed.fb)
+        m_composed.fb = g_pHyprRenderer->createFB("resize-transition composed");
+    if (m_composed.fb->m_size != monitor->m_pixelSize && !m_composed.fb->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
+        m_failure = "framebuffer alloc failed";
+        return false;
+    }
+    m_composed.fb->setImageDescription(monitor->workBufferImageDescription());
+    auto* const target = dynamic_cast<Render::GL::CGLFramebuffer*>(m_composed.fb.get());
+    if (!target) {
+        m_failure = "renderer is not OpenGL";
+        return false;
+    }
+    m_composed.contentPx = (boxSize * monitor->m_scale).round().clamp(Vector2D{1, 1}, monitor->m_pixelSize);
+
+    const bool showNew = m_newReady && m_new.fb;
+    // weight 0 is the degenerate mesh whatever the leaves are: one whole-content leaf says the same with two triangles.
+    const bool               meshed = m_mesh && weight > 0.F;
+    const Vector2D           newPx  = showNew ? m_new.contentPx : m_old.contentPx;
+    const Geometry::SSize    oldCanvas = meshed ? m_mesh->oldCanvas : Geometry::SSize{m_old.contentPx.x, m_old.contentPx.y};
+    const Geometry::SSize    newCanvas = meshed ? m_mesh->newCanvas : Geometry::SSize{newPx.x, newPx.y};
+    std::vector<prep::Leaf>  whole;
+    if (!meshed) {
+        prep::Leaf leaf;
+        leaf.oldBox      = {0, 0, sc<int>(oldCanvas.w), sc<int>(oldCanvas.h)};
+        leaf.newBox      = {0, 0, sc<int>(newCanvas.w), sc<int>(newCanvas.h)};
+        leaf.midpointBox = {0, 0, (oldCanvas.w + newCanvas.w) / 2, (oldCanvas.h + newCanvas.h) / 2};
+        whole.push_back(std::move(leaf));
+    }
+    const auto& leaves = meshed ? m_mesh->leaves : whole;
+
+    Presenter::SLayer layers[2];
+    size_t            count = 0;
+    const auto        add   = [&](Geometry::ESide side, const SSnapshot& snap, float opacity) {
+        if (opacity <= 0.F)
+            return;
+        auto& batch = m_batches[side];
+        batch.vertices.clear();
+        batch.indices.clear();
+        Geometry::build(leaves, oldCanvas, newCanvas, side, m_progress, meshed ? weight : 0., batch);
+        layers[count++] = {.texture = snap.fb->getTexture()->m_texID,
+                           .uExtent = sc<float>(snap.contentPx.x / snap.fb->m_size.x),
+                           .vExtent = sc<float>(snap.contentPx.y / snap.fb->m_size.y),
+                           .batch   = &batch,
+                           .opacity = opacity};
+    };
+    add(Geometry::OLD, m_old, showNew ? 1.F - m_fade : 1.F);
+    if (showNew)
+        add(Geometry::NEW, m_new, m_fade);
+    if (!Presenter::compose(target->getFBID(), sc<int>(m_composed.contentPx.x), sc<int>(m_composed.contentPx.y), std::span{layers, count})) {
+        m_failure = Presenter::failure();
+        return false;
+    }
     return true;
 }
 
@@ -157,13 +245,32 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
         // Re-captured every frame: desynced subsurfaces commit without the main surface, so commit-driven capture would miss them.
         if (!capture(m_new))
             return false;
-        if (!held && !m_switching) {
+    }
+
+    if (!held)
+        m_moving = true;
+    // Geometry t follows the box itself (D3-2), along the axis that changes most: held -> 0, animation over -> 1.
+    const auto     size  = window->sizeAnimation()->value();
+    const Vector2D delta = m_goalSize - m_beginSize;
+    const bool     wide  = std::abs(delta.x) >= std::abs(delta.y);
+    const double   span  = wide ? delta.x : delta.y;
+    m_progress           = span == 0 ? 1. : std::clamp((wide ? size.x - m_beginSize.x : size.y - m_beginSize.y) / span, 0., 1.);
+    float weight         = 0.F;
+    if (m_mesh)
+        weight = !m_revoked ? 1.F : config.meshRampMs <= 0 ? 0.F : std::clamp(1.F - sc<float>(msSince(m_revokedAt, now) / config.meshRampMs), 0.F, 1.F);
+
+    if (m_newReady) {
+        // Old -> new switch: with a mesh, at the midpoint, where the two sides' geometry agrees; plain scale has no such point and
+        // switches as soon as the box moves.
+        if (!held && !m_switching && (weight <= 0.F || m_progress >= .5)) {
             m_switching = true;
             m_switchAt  = now;
         }
         if (m_switching)
             m_fade = config.crossfadeMs <= 0 ? 1.F : std::clamp(sc<float>(msSince(m_switchAt, now) / config.crossfadeMs), 0.F, 1.F);
     }
+    if (!compose(size, weight))
+        return false;
 
     const bool animating = window->sizeAnimation()->isBeingAnimated();
     if (animating)
@@ -186,7 +293,7 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
 
 void CResizeTransition::preWindowRender(CSurfacePassElement::SRenderData* renderData) {
     m_frameValid = false;
-    if (!renderData || !m_old.fb)
+    if (!renderData || !m_composed.fb)
         return;
     const auto monitor = renderData->pMonitor.lock();
     if (!monitor)
@@ -229,16 +336,12 @@ void CResizeTransition::drawSnapshot(const SSnapshot& snap, const CBox& box, flo
     setCustomUV(UV_UNSET, UV_UNSET);
 }
 
-// Presenter, degenerate mesh: both snapshots scaled to the animated content box. `in` is already bound by drawTransformedWindow.
+// The composed image, scaled to the animated content box (1:1 but for sub-pixel rounding). `in` is already bound by drawTransformedWindow.
 SP<Render::IFramebuffer> CResizeTransition::transform(SP<Render::IFramebuffer> in) {
     if (!m_frameValid)
         return in;
     m_frameValid = false;
 
-    const bool showNew = m_newReady && m_new.fb;
-    if (!showNew || m_fade < 1.F)
-        drawSnapshot(m_old, m_contentBox, m_drawAlpha);
-    if (showNew)
-        drawSnapshot(m_new, m_contentBox, m_drawAlpha * m_fade);
+    drawSnapshot(m_composed, m_contentBox, m_drawAlpha);
     return in;
 }

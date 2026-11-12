@@ -1,17 +1,29 @@
-// Per-window resize transition: old snapshot + live new content, both drawn by one Presenter path (plain-scale degenerate mesh, D1-4).
+// Per-window resize transition: old snapshot + live new content, composed by one Presenter path -- a prepared mesh when one was offered in
+// time, the plain-scale degenerate mesh otherwise (D1-4) -- into a box-sized image that is then drawn like a surface (rounding, alpha).
 // Owned by the window through CWindow::m_transformers while a generation is active; detached (-> native drawing) when it ends or on any error.
 #pragma once
+
+#include "Geometry.hpp"
 
 #include <hyprland/src/render/transformer/Transformer.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 
 #include <chrono>
+#include <optional>
 #include <string>
+#include <vector>
 
 struct STransitionConfig {
     long crossfadeMs;        // D3-1 old -> new fade length once the new-size buffer arrives
     long newBufferTimeoutMs; // after the size animation ends, wait this long for the new-size buffer, then native
+    long meshRampMs;         // D3-5 mesh weight ramp on a revoke
+};
+
+// A prepared mesh: leaves in analysis px of the two images the prep worker was given.
+struct SMesh {
+    std::vector<prep::Leaf> leaves;
+    Geometry::SSize         oldCanvas, newCanvas;
 };
 
 class CResizeTransition : public Render::IWindowTransformer {
@@ -25,6 +37,13 @@ class CResizeTransition : public Render::IWindowTransformer {
     // Called before each frame of the window's monitor. false -> transition is over (done or failed); caller detaches.
     // held: the animation is held (D3-3) -> the box still has its begin size, so the old snapshot stays; the switch waits for release.
     bool                     prepareFrame(const STransitionConfig& config, bool held);
+
+    // Offers this generation's mesh. Taken only while the box has not started moving (still held): the mesh's old half plays from t = 0,
+    // and a box already under way has scheduled its old/new switch without it. false -> too late, the generation stays plain scale.
+    bool                     offerMesh(SMesh&& mesh);
+    // F9: the selection the mesh came from was revoked -> its weight ramps to 0 over meshRampMs (D3-5), leaving plain scale.
+    // true -> a drawn mesh started its ramp out.
+    bool                     revokeMesh();
 
     SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override;
     void                     preWindowRender(CSurfacePassElement::SRenderData* renderData) override;
@@ -48,10 +67,19 @@ class CResizeTransition : public Render::IWindowTransformer {
   private:
 
     bool                             capture(SSnapshot& out);
+    bool                             compose(const Vector2D& boxSize, float weight);
     void                             drawSnapshot(const SSnapshot& snap, const CBox& box, float alpha);
 
     PHLWINDOWREF                     m_window;
     SSnapshot                        m_old, m_new;
+    SSnapshot                        m_composed; // this frame's Presenter output, contentPx = the animated box in device px
+    std::optional<SMesh>             m_mesh;
+    bool                             m_moving  = false; // the box has left its begin size (first frame not held)
+    bool                             m_revoked = false;
+    std::chrono::steady_clock::time_point m_revokedAt;
+    Vector2D                         m_beginSize, m_goalSize; // size animation value at beginGeneration, and its goal
+    double                           m_progress = 0;          // geometry t: the box's way from m_beginSize to m_goalSize, 0..1
+    Geometry::SBatch                 m_batches[2];
     Vector2D                         m_targetAck; // configure size the client must ack (CWindow::sendWindowSize stores goal.floor())
     bool                             m_newReady  = false; // client acked the target size; m_new is captured every frame from here
     bool                             m_switching = false; // old -> new fade running (starts at the first frame after any hold)

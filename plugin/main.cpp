@@ -8,9 +8,10 @@
 // Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
 // Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread.
 // Prep (S5): each readiness selection sends the old snapshot and the current new content, at analysis resolution, to the out-of-process
-// prep worker (D1-1); its answer releases the hold. The mesh itself is not drawn yet: the Presenter still plain-scales.
+// prep worker (D1-1); its answer releases the hold and, when it came before the box moved, becomes the mesh the Presenter draws.
 #include "Hold.hpp"
 #include "Prep.hpp"
+#include "Presenter.hpp"
 #include "Readback.hpp"
 #include "Readiness.hpp"
 #include "Thumbnail.hpp"
@@ -44,6 +45,8 @@ namespace {
     SP<Config::Values::CBoolValue>   cfgReadiness;
     SP<Config::Values::CStringValue> cfgReadinessDump;
     SP<Config::Values::CStringValue> cfgPrepWorker;
+    SP<Config::Values::CBoolValue>   cfgMesh;
+    SP<Config::Values::CIntValue>    cfgMeshRampMs;
 
     struct STracked {
         PHLWINDOWREF               window;
@@ -76,9 +79,11 @@ namespace {
     };
     std::vector<SStaged> staged;
 
-    // stale = answers for a superseded generation or selection; inHold / afterHold = usable answers by whether the hold was still on.
+    // stale = answers for a superseded generation or selection; inHold / afterHold = usable answers by whether the hold was still on;
+    // meshDrawn / meshLate = usable answers the transition took / refused because its box was already moving; meshRevoked = drawn
+    // meshes whose selection was revoked.
     struct SPrepCounters {
-        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, inHold = 0, afterHold = 0;
+        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshRevoked = 0;
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
@@ -310,6 +315,8 @@ namespace {
                     if (current) {
                         ++t->selection;
                         t->stageWanted = false;
+                        if (t->transition->revokeMesh())
+                            ++prepCounts.meshRevoked;
                     }
                     break;
                 case Readiness::SEvent::SUMMARY: log("readiness summary " + e.text); break;
@@ -338,11 +345,11 @@ namespace {
         });
     }
 
-    // D3-3: the hold ends on mesh ready. Until the Presenter draws the mesh this only shortens the hold.
+    // D3-3: the hold ends on mesh ready. The mesh is offered first, while the box is still held: released, it would be too late.
     void onPrepAnswers() {
         if (const auto failure = Prep::takeFailure())
             log("prep worker down, plain scale from here: " + *failure);
-        for (const auto& a : Prep::drain()) {
+        for (auto& a : Prep::drain()) {
             const auto* t = findTracked(a.window);
             if (!t || !t->transition || t->generation != a.generation || t->selection != a.selection) {
                 ++prepCounts.stale;
@@ -356,11 +363,17 @@ namespace {
             const auto now    = Hold::Clock::now();
             const bool held   = Hold::held(w, now);
             const auto readyMs = (nowNs() - t->resizeNs) / 1e6;
+            const auto leaves  = a.leaves.size();
+            const bool drawn   = cfgMesh->value() && t->transition->offerMesh({std::move(a.leaves),
+                                                                               {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
+                                                                               {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}});
             Hold::release(w, now);
             ++(held ? prepCounts.inHold : prepCounts.afterHold);
+            ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
             meshReadyMs.push_back(readyMs);
-            log(std::format("prep 0x{:x} gen {} selection {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}", a.window,
-                            a.generation, a.selection, readyMs, a.leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over"));
+            log(std::format("prep 0x{:x} gen {} selection {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}",
+                            a.window, a.generation, a.selection, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
+                            drawn ? "mesh drawn" : "plain scale"));
         }
     }
 
@@ -384,7 +397,10 @@ namespace {
         syncPrepWorker();
         syncWindows();
 
-        const STransitionConfig config{.crossfadeMs = cfgCrossfadeMs->value(), .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value()};
+        const STransitionConfig config{.crossfadeMs = cfgCrossfadeMs->value(), .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value(), .meshRampMs = cfgMeshRampMs->value()};
+        // The Presenter draws with raw GL on every attached frame, also on those that capture nothing.
+        if (const auto gl = g_pHyprRenderer->glBackend())
+            gl->makeEGLCurrent();
         for (auto& t : tracked) {
             if (!t->transition)
                 continue;
@@ -448,9 +464,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
                                                                 "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
     cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
                                                                 "Path of the prep-worker executable the plugin runs (empty = the path it was built with)", "");
+    cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the window starts to move (0 = plain scale only)", true);
+    // 80 ms: D3-5 starting value (M3) for the mesh weight ramp.
+    cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
+                                                          "Ms over which a mesh whose content changed under it relaxes back to plain scale", 80,
+                                                          Config::Values::SIntValueOptions{.min = 0});
     for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
                               SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
-                              SP<Config::Values::IValue>(cfgPrepWorker)})
+                              SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
             throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
 
@@ -487,6 +508,8 @@ APICALL EXPORT void PLUGIN_EXIT() {
     log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} in_hold {} after_hold {}",
                     prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
                     prepCounts.inHold, prepCounts.afterHold));
+    log(std::format("mesh counters: drawn {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshLate, prepCounts.meshRevoked));
+    Presenter::destroy();
     if (!meshReadyMs.empty()) {
         std::ranges::sort(meshReadyMs);
         log(std::format("mesh ready ms after resize over {} answers: min {:.1f} median {:.1f} max {:.1f}", meshReadyMs.size(), meshReadyMs.front(),

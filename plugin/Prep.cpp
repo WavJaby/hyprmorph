@@ -96,10 +96,14 @@ namespace {
             const auto doc = prep::json::parse(text);
             if (answer.ok) {
                 if (const auto* leaves = doc.find("leaves"); leaves && leaves->isArray())
-                    answer.leaves = leaves->size();
+                    answer.leaves = prep::leavesFromJson(*leaves);
             } else if (const auto* reason = doc.find("reason"); reason && reason->isString())
                 answer.refusal = reason->str();
         }
+        answer.oldWidth    = q.request.oldImage.width;
+        answer.oldHeight   = q.request.oldImage.height;
+        answer.newWidth    = q.request.newImage.width;
+        answer.newHeight   = q.request.newImage.height;
         answer.roundTripMs = std::chrono::duration<double, std::milli>(Clock::now() - q.queuedAt).count();
         return answer;
     }
