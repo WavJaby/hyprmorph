@@ -7,6 +7,8 @@
 #include "proposals.hpp"
 
 #include <opencv2/core/utility.hpp>
+
+#include <cstdlib>
 #include <opencv2/imgproc.hpp>
 
 #include <chrono>
@@ -20,7 +22,17 @@ double Result::prepMs() const {
     return total;
 }
 
-Preparer::Preparer(gles::Context& context) : ncc(context), cg(context) {}
+namespace {
+// No stage uses cv::UMat, but OpenCV initialises its OpenCL runtime on first use anyway: every installed ICD is loaded (NVIDIA OpenCL +
+// CUDA, Intel) and /dev/nvidia* is opened -- ~140 MB of PSS and a discrete-GPU touch for nothing; GPU work here is GLES.
+// cv::ocl::setUseOpenCL(false) does not stop the load; the loader only honours this variable, read at its first use.
+gles::Context& withoutOpenCL(gles::Context& context) {
+    setenv("OPENCV_OPENCL_RUNTIME", "disabled", 0);
+    return context;
+}
+}
+
+Preparer::Preparer(gles::Context& context) : ncc(withoutOpenCL(context)), cg(context) {}
 
 double Preparer::warm() {
     auto started = std::chrono::steady_clock::now();
