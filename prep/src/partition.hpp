@@ -1,6 +1,7 @@
 #pragma once
 // Paired rectilinear partitions (ports of partition_transition.seams / best_split / paired_partition,
 // joint_partition.py, joint_alignment_probe.select_partition evidence, midpoint_layout.py).
+#include "points.hpp"
 #include "pairing.hpp"
 #include "types.hpp"
 

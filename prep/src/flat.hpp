@@ -1,5 +1,6 @@
 #pragma once
 // Separable content-preserving leaf meshes, D4-1 isotropic shrink (port of experiments/flat_absorb.py).
+#include "points.hpp"
 #include "types.hpp"
 
 #include <opencv2/core.hpp>

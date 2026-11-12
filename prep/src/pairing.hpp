@@ -2,6 +2,7 @@
 // Region pairing (ports of feature_guided_region_pairing.pair_regions / evidence, structure_midpoint.geometry_cost /
 // select_safe_candidates, feature_guided_small_regions.choose_supported, joint_alignment_probe.verified_landmarks,
 // render_feature_guided_refinement.overlaps_coarse / contained_pair).
+#include "points.hpp"
 #include "proposals.hpp"
 #include "types.hpp"
 

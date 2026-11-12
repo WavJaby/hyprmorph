@@ -1,6 +1,7 @@
 #pragma once
 // ORB correspondences + contour proposals (ports of feature_guided_region_pairing.match_images,
 // structure_midpoint.discover / open_outlines, automatic_object_mesh.proposals, small_candidate_sweep.small_proposals).
+#include "points.hpp"
 #include "types.hpp"
 
 #include <opencv2/core.hpp>

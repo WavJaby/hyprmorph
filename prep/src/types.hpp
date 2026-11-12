@@ -1,8 +1,7 @@
 #pragma once
 // Leaf = one partition region as the Presenter draws it (same JSON shape as experiments/acceptance_pipeline.py).
+// Standard library only: the compositor plugin compiles this file and types.cpp to read the worker's payload.
 #include "json.hpp"
-
-#include <opencv2/core.hpp>
 
 #include <array>
 #include <optional>
@@ -46,8 +45,6 @@ struct Leaf {
     std::vector<std::array<int, 4>> windows;
     const Box& box(int side) const { return side ? newBox : oldBox; }
 };
-
-using Points = std::vector<cv::Point2f>;   // ORB correspondences, analysis px, pixel-edge convention
 
 json::Value toJson(const Grid& grid);
 Grid gridFromJson(const json::Value& value);
