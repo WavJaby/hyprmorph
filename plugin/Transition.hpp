@@ -15,9 +15,10 @@
 #include <vector>
 
 struct STransitionConfig {
-    long crossfadeMs;        // D3-1 old -> new fade length once the new-size buffer arrives
-    long newBufferTimeoutMs; // after the size animation ends, wait this long for the new-size buffer, then native
-    long meshRampMs;         // D3-5 mesh weight ramp on a revoke
+    double crossfadeSpan;      // D3-1 old -> new fade, in transition progress, from the t = 0.5 switch
+    long   crossfadeMs;        // fade length when the new-size buffer arrives after that window opened
+    long   newBufferTimeoutMs; // after the size animation ends, wait this long for the new-size buffer, then native
+    long   meshRampMs;         // D3-5 mesh weight ramp on a revoke
 };
 
 // A prepared mesh: leaves in analysis px of the two images the prep worker was given.
@@ -38,9 +39,10 @@ class CResizeTransition : public Render::IWindowTransformer {
     // held: the animation is held (D3-3) -> the box still has its begin size, so the old snapshot stays; the switch waits for release.
     bool                     prepareFrame(const STransitionConfig& config, bool held);
 
-    // Offers this generation's mesh. Taken only while the box has not started moving (still held): the mesh's old half plays from t = 0,
-    // and a box already under way has scheduled its old/new switch without it. false -> too late, the generation stays plain scale.
-    bool                     offerMesh(SMesh&& mesh);
+    // Offers this generation's mesh. Taken while only old content is on screen and the box is short of the crossfade window: transition
+    // progress then restarts at 0 from the box's current progress (the mesh's t = 0 is the plain scale already shown, so it joins without a
+    // jump). false -> too late, the generation stays plain scale. joined: taken after the box started moving.
+    bool                     offerMesh(SMesh&& mesh, bool& joined);
     // F9: the selection the mesh came from was revoked -> its weight ramps to 0 over meshRampMs (D3-5), leaving plain scale.
     // true -> a drawn mesh started its ramp out.
     bool                     revokeMesh();
@@ -78,11 +80,17 @@ class CResizeTransition : public Render::IWindowTransformer {
     bool                             m_revoked = false;
     std::chrono::steady_clock::time_point m_revokedAt;
     Vector2D                         m_beginSize, m_goalSize; // size animation value at beginGeneration, and its goal
-    double                           m_progress = 0;          // geometry t: the box's way from m_beginSize to m_goalSize, 0..1
+    // Size follows Hyprland's animation (D3-2); content follows transition progress, derived from it so both end together:
+    // t = (box - join) / (1 - join), join = box progress when the mesh was taken (0 without a mesh, or with one taken during the hold).
+    double                           m_boxProgress = 0; // the box's way from m_beginSize to m_goalSize on the axis that changes most, 0..1
+    double                           m_join        = 0;
+    double                           m_transition  = 0; // t: drives mesh geometry and the old -> new crossfade
     Geometry::SBatch                 m_batches[2];
     Vector2D                         m_targetAck; // configure size the client must ack (CWindow::sendWindowSize stores goal.floor())
-    bool                             m_newReady  = false; // client acked the target size; m_new is captured every frame from here
-    bool                             m_switching = false; // old -> new fade running (starts at the first frame after any hold)
+    bool                             m_newReady    = false; // client acked the target size; m_new is captured every frame from here
+    bool                             m_windowOpen  = false; // t reached the crossfade window (with or without new content)
+    bool                             m_switching   = false; // old -> new fade started
+    bool                             m_fadeByClock = false; // new content arrived after the window opened: fade over crossfadeMs from then
     std::chrono::steady_clock::time_point m_switchAt, m_animEndAt;
     bool                             m_animEnded = false;
     float                            m_fade      = 0.F; // 0 = old only, 1 = new only

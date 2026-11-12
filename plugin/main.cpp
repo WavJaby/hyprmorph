@@ -41,6 +41,7 @@ namespace {
     HANDLE handle = nullptr;
 
     SP<Config::Values::CBoolValue> cfgEnabled;
+    SP<Config::Values::CFloatValue> cfgCrossfadeSpan;
     SP<Config::Values::CIntValue>  cfgCrossfadeMs;
     SP<Config::Values::CIntValue>  cfgNewBufferTimeoutMs;
     SP<Config::Values::CIntValue>  cfgHoldMs;
@@ -92,9 +93,11 @@ namespace {
 
     // stale = answers for a superseded generation or candidate (speculation that did not pay); early = usable answers that were in before
     // their candidate was selected; inHold / afterHold = usable answers by whether the hold was still on; meshDrawn / meshLate = usable
-    // answers the transition took / refused because its box was already moving; meshRevoked = drawn meshes whose selection was revoked.
+    // answers the transition took / refused because its box was past the crossfade window; meshJoined = drawn meshes taken after the box
+    // started moving; meshRevoked = drawn meshes whose selection was revoked.
     struct SPrepCounters {
-        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, early = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshRevoked = 0;
+        unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, early = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshJoined = 0,
+                      meshRevoked = 0;
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
@@ -344,8 +347,16 @@ namespace {
         ++prepCounts.staged;
     }
 
-    // D3-3: mesh ready = the selected candidate's answer is in. The mesh is offered here, while the box is still held (released, it would
-    // be too late); the hold itself ends in releaseGroups, once the whole group is settled.
+    STransitionConfig transitionConfig() {
+        return {.crossfadeSpan      = cfgCrossfadeSpan->value(),
+                .crossfadeMs        = cfgCrossfadeMs->value(),
+                .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value(),
+                .meshRampMs         = cfgMeshRampMs->value()};
+    }
+
+    // D3-3: mesh ready = the selected candidate's answer is in. Offered here: during the hold it plays from the box's start, after it the
+    // transition joins the moving box if that is still short of the crossfade window. The hold itself ends in releaseGroups, once the whole
+    // group is settled.
     void useAnswer(STracked& t) {
         auto       a = std::move(*t.answer);
         t.answer.reset();
@@ -354,16 +365,20 @@ namespace {
         const bool held    = Hold::held(w, now);
         const auto readyMs = (nowNs() - t.resizeNs) / 1e6;
         const auto leaves  = a.leaves.size();
+        bool       joined  = false;
         const bool drawn   = cfgMesh->value() && t.transition->offerMesh({std::move(a.leaves),
                                                                           {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
-                                                                          {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}});
+                                                                          {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}},
+                                                                         joined);
         t.settled = true;
         ++(held ? prepCounts.inHold : prepCounts.afterHold);
         ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
+        if (joined)
+            ++prepCounts.meshJoined;
         meshReadyMs.push_back(readyMs);
         log(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
                         a.generation, a.candidate, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
-                        drawn ? "mesh drawn" : "plain scale"));
+                        !drawn ? "plain scale" : joined ? "mesh joined the moving box" : "mesh drawn"));
     }
 
     // D3-4: a group leaves the hold when every member is settled; until then a settled member waits (its cap still bounds the wait).
@@ -529,7 +544,7 @@ namespace {
         syncPrepWorker();
         syncWindows();
 
-        const STransitionConfig config{.crossfadeMs = cfgCrossfadeMs->value(), .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value(), .meshRampMs = cfgMeshRampMs->value()};
+        const STransitionConfig config = transitionConfig();
         // The Presenter draws with raw GL on every attached frame, also on those that capture nothing.
         if (const auto gl = g_pHyprRenderer->glBackend())
             gl->makeEGLCurrent();
@@ -580,9 +595,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
         throw std::runtime_error("resize-transition: compositor ABI mismatch, rebuild against the running Hyprland");
 
     cfgEnabled = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:enabled", "Draw window size changes through the plugin (0 = native drawing)", true);
-    // 100 ms: D3-1 starting value (M3), the short crossfade around the old/new switch; tunable per user taste.
+    // 0.3: t 0.5..0.8 (user, 2026-11-12). Without a mesh that is box progress, ~62..128 ms after release on a 479 ms easeOutQuint animation,
+    // box speed 73 % -> 32 % of its peak. Starting at the switch, not before it, lets a late mesh join until box progress 0.5. Tunable.
+    cfgCrossfadeSpan = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_span",
+                                                               "Old-to-new crossfade length in transition progress (0..1), starting at the old/new switch at 0.5", .3F,
+                                                               Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    // 100 ms: D3-1 starting value (M3); now only for new content that arrives after the crossfade window opened.
     cfgCrossfadeMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:crossfade_ms",
-                                                           "Old-to-new crossfade length in ms, starting when the client commits the new-size buffer", 100,
+                                                           "Old-to-new crossfade length in ms when the new-size buffer arrives after the crossfade window opened", 100,
                                                            Config::Values::SIntValueOptions{.min = 0});
     // 300 ms: covers the Discord pilot's main reflow (max 190 ms) and later update (max 255 ms) after geometry settled (findings.md).
     cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:new_buffer_timeout_ms",
@@ -597,12 +617,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
                                                                 "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
     cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
                                                                 "Path of the prep-worker executable the plugin runs (empty = the path it was built with)", "");
-    cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the window starts to move (0 = plain scale only)", true);
+    cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
     // 80 ms: D3-5 starting value (M3) for the mesh weight ramp.
     cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
                                                           "Ms over which a mesh whose content changed under it relaxes back to plain scale", 80,
                                                           Config::Values::SIntValueOptions{.min = 0});
-    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
+    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeSpan), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
                               SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
                               SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
@@ -641,7 +661,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} early {} in_hold {} after_hold {}",
                     prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
                     prepCounts.early, prepCounts.inHold, prepCounts.afterHold));
-    log(std::format("mesh counters: drawn {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshLate, prepCounts.meshRevoked));
+    log(std::format("mesh counters: drawn {} joined {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshJoined, prepCounts.meshLate, prepCounts.meshRevoked));
     log(std::format("group counters: group_releases {} group_waits {}", groupCounts.groupReleases, groupCounts.groupWaits));
     Presenter::destroy();
     if (!meshReadyMs.empty()) {

@@ -20,6 +20,9 @@ namespace {
     // Hyprland's "no custom UV" sentinel for m_renderData.primarySurfaceUV*.
     const Vector2D UV_UNSET{-1, -1};
 
+    // Old/new switch: the t where Geometry::build's two sides meet at the midpoint layout. The crossfade starts here.
+    constexpr double SWITCH_AT = .5;
+
     void setCustomUV(const Vector2D& topLeft, const Vector2D& bottomRight) {
         auto& rd                       = g_pHyprRenderer->m_renderData;
         rd.primarySurfaceUVTopLeft     = topLeft;
@@ -131,24 +134,33 @@ bool CResizeTransition::beginGeneration(const Vector2D& goalSize) {
     if (!capture(m_old))
         return false;
     m_targetAck = goalSize.clamp(Vector2D{0, 0}, Math::VECTOR2D_MAX).floor();
-    m_newReady  = false;
-    m_switching = false;
-    m_fade      = 0.F;
-    m_animEnded = false;
+    m_newReady    = false;
+    m_windowOpen  = false;
+    m_switching   = false;
+    m_fadeByClock = false;
+    m_fade        = 0.F;
+    m_animEnded   = false;
     m_mesh.reset();
-    m_moving    = false;
-    m_revoked   = false;
-    m_beginSize = m_window->sizeAnimation()->value();
-    m_goalSize  = goalSize;
-    m_progress  = 0;
+    m_moving      = false;
+    m_revoked     = false;
+    m_beginSize   = m_window->sizeAnimation()->value();
+    m_goalSize    = goalSize;
+    m_boxProgress = 0;
+    m_join        = 0;
+    m_transition  = 0;
     return true;
 }
 
-bool CResizeTransition::offerMesh(SMesh&& mesh) {
-    if (m_moving || mesh.leaves.empty())
+bool CResizeTransition::offerMesh(SMesh&& mesh, bool& joined) {
+    // Without a mesh t == box progress, so "short of the window" is also "the plain fade has not started": restarting t cannot pull new
+    // content back off the screen.
+    if (m_mesh || mesh.leaves.empty() || m_windowOpen || m_boxProgress >= SWITCH_AT)
         return false;
-    m_mesh    = std::move(mesh);
-    m_revoked = false;
+    m_mesh       = std::move(mesh);
+    m_revoked    = false;
+    m_join       = m_moving ? m_boxProgress : 0.;
+    m_transition = 0;
+    joined       = m_moving;
     return true;
 }
 
@@ -160,7 +172,7 @@ bool CResizeTransition::revokeMesh() {
     return true;
 }
 
-// Presenter: old and new content through the mesh (or the degenerate one) at m_progress, summed by the fade, into m_composed.
+// Presenter: old and new content through the mesh (or the degenerate one) at m_transition, summed by the fade, into m_composed.
 bool CResizeTransition::compose(const Vector2D& boxSize, float weight) {
     const auto window  = m_window.lock();
     const auto monitor = window->m_monitor.lock();
@@ -206,7 +218,7 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight) {
         auto& batch = m_batches[side];
         batch.vertices.clear();
         batch.indices.clear();
-        Geometry::build(leaves, oldCanvas, newCanvas, side, m_progress, meshed ? weight : 0., batch);
+        Geometry::build(leaves, oldCanvas, newCanvas, side, m_transition, meshed ? weight : 0., batch);
         layers[count++] = {.texture = snap.fb->getTexture()->m_texID,
                            .uExtent = sc<float>(snap.contentPx.x / snap.fb->m_size.x),
                            .vExtent = sc<float>(snap.contentPx.y / snap.fb->m_size.y),
@@ -249,25 +261,34 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
 
     if (!held)
         m_moving = true;
-    // Geometry t follows the box itself (D3-2), along the axis that changes most: held -> 0, animation over -> 1.
+    // Box progress along the axis that changes most: held -> 0, animation over -> 1. Transition progress restarts at the mesh's join.
     const auto     size  = window->sizeAnimation()->value();
     const Vector2D delta = m_goalSize - m_beginSize;
     const bool     wide  = std::abs(delta.x) >= std::abs(delta.y);
     const double   span  = wide ? delta.x : delta.y;
-    m_progress           = span == 0 ? 1. : std::clamp((wide ? size.x - m_beginSize.x : size.y - m_beginSize.y) / span, 0., 1.);
+    m_boxProgress        = span == 0 ? 1. : std::clamp((wide ? size.x - m_beginSize.x : size.y - m_beginSize.y) / span, 0., 1.);
+    m_transition         = m_join >= 1. ? 1. : std::clamp((m_boxProgress - m_join) / (1. - m_join), 0., 1.);
     float weight         = 0.F;
     if (m_mesh)
         weight = !m_revoked ? 1.F : config.meshRampMs <= 0 ? 0.F : std::clamp(1.F - sc<float>(msSince(m_revokedAt, now) / config.meshRampMs), 0.F, 1.F);
 
-    if (m_newReady) {
-        // Old -> new switch: with a mesh, at the midpoint, where the two sides' geometry agrees; plain scale has no such point and
-        // switches as soon as the box moves.
-        if (!held && !m_switching && (weight <= 0.F || m_progress >= .5)) {
-            m_switching = true;
-            m_switchAt  = now;
-        }
-        if (m_switching)
+    // Old -> new crossfade over t = SWITCH_AT .. SWITCH_AT + span: with a mesh on its transition progress, without one on the box's (plain
+    // scale waits for the switch too, so a late mesh can still join before it). New content that arrives after the window opened fades in
+    // over crossfadeMs instead.
+    const double fadeStart = SWITCH_AT;
+    const bool   wasOpen   = m_windowOpen;
+    if (!held && m_transition >= fadeStart)
+        m_windowOpen = true;
+    if (m_newReady && m_windowOpen && !m_switching) {
+        m_switching   = true;
+        m_switchAt    = now;
+        m_fadeByClock = wasOpen && config.crossfadeSpan > 0;
+    }
+    if (m_switching) {
+        if (m_fadeByClock)
             m_fade = config.crossfadeMs <= 0 ? 1.F : std::clamp(sc<float>(msSince(m_switchAt, now) / config.crossfadeMs), 0.F, 1.F);
+        else
+            m_fade = config.crossfadeSpan <= 0 ? 1.F : std::clamp(sc<float>((m_transition - fadeStart) / config.crossfadeSpan), 0.F, 1.F);
     }
     if (!compose(size, weight))
         return false;
