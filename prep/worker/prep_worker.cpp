@@ -1,11 +1,13 @@
 // prep-worker: long-lived mesh preparation service (D1-1: out of the compositor process).
 //
-//   prep-worker [--socket PATH] [--node /dev/dri/renderD128]
+//   prep-worker [--socket PATH | --fd N] [--node /dev/dri/renderD128]
 //
-// Owns one headless EGL/GLES context on the render node and the compiled NCC/CG kernels for its whole life, so a
-// request pays no context, shader or JIT cost after the first one. Serves the contract in src/ipc.hpp: one client
-// connection at a time, requests in order. Socket default: $XDG_RUNTIME_DIR/resize-transition/prep.sock (directory
-// 0700). Default: mutating (creates the socket; runs until killed).
+// Owns one headless EGL/GLES context on the render node and the compiled NCC/CG kernels for its whole life, so a request pays no context,
+// shader or JIT cost after the first one. Serves the contract in src/wire.hpp, requests in order.
+// --socket (default $XDG_RUNTIME_DIR/resize-transition/prep.sock, directory 0700): listens, one client connection at a time, runs until
+// killed -- for the tools. --fd N: serves the already-connected SOCK_SEQPACKET socket inherited as descriptor N and exits when the peer
+// closes it -- how the compositor plugin runs it, so the worker's life is the connection's (no path, no orphan after a compositor crash).
+// Default: mutating (creates the socket; runs until killed).
 #include "../src/ipc.hpp"
 #include "../src/pipeline.hpp"
 
@@ -33,23 +35,16 @@ void cleanup(int) {
     _exit(0);
 }
 
-int payloadMemfd(const std::string& text) {
-    int fd = memfd_create("resize-prep-payload", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) throw std::runtime_error("memfd_create payload");
-    if (write(fd, text.data(), text.size()) != ssize_t(text.size())) throw std::runtime_error("write payload");
-    fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
-    return fd;
-}
-
 void respond(int client, const ipc::RequestHeader& request, ipc::Status status, double prepMs, const json::Value& payload) {
     ipc::ResponseHeader header;
     header.generation = request.generation;
     header.window = request.window;
+    header.selection = request.selection;
     header.status = status;
     header.prepMs = prepMs;
     std::string text = json::dump(payload);
     header.payloadBytes = uint32_t(text.size());
-    int fd = payloadMemfd(text);
+    int fd = ipc::sealedMemfd("resize-prep-payload", text.data(), text.size());
     ipc::sendPacket(client, &header, sizeof header, &fd, 1);
     close(fd);
 }
@@ -95,25 +90,34 @@ void serve(int client, Preparer& preparer) {
 int main(int argc, char** argv) {
     try {
         std::string node = "/dev/dri/renderD128";
+        int inherited = -1;
         for (int i = 1; i < argc; ++i) {
             std::string a = argv[i];
             if (a == "--socket" && i + 1 < argc) socketFile = argv[++i];
+            else if (a == "--fd" && i + 1 < argc) inherited = std::atoi(argv[++i]);
             else if (a == "--node" && i + 1 < argc) node = argv[++i];
             else {
-                std::fprintf(stderr, "usage: prep-worker [--socket PATH] [--node RENDER_NODE]\n");
+                std::fprintf(stderr, "usage: prep-worker [--socket PATH | --fd N] [--node RENDER_NODE]\n");
                 return 2;
             }
         }
-        if (socketFile.empty()) socketFile = ipc::socketPath();
-        std::filesystem::path folder = std::filesystem::path(socketFile).parent_path();
-        std::filesystem::create_directories(folder);
-        std::filesystem::permissions(folder, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+        if (inherited >= 0 && !socketFile.empty()) throw std::invalid_argument("--socket and --fd exclude each other");
         cv::setNumThreads(1);
         auto started = std::chrono::steady_clock::now();
         gles::Context context(node);
         Preparer preparer(context);
         double startup = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         double warm = preparer.warm();
+        if (inherited >= 0) {
+            // Requests sent during start-up waited in the socket buffer.
+            std::fprintf(stderr, "prep-worker: serving fd %d (context + kernels %.1f ms, warm-up %.1f ms)\n", inherited, startup, warm);
+            serve(inherited, preparer);
+            return 0;
+        }
+        if (socketFile.empty()) socketFile = ipc::socketPath();
+        std::filesystem::path folder = std::filesystem::path(socketFile).parent_path();
+        std::filesystem::create_directories(folder);
+        std::filesystem::permissions(folder, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
         int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
         sockaddr_un address{};
         address.sun_family = AF_UNIX;

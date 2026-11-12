@@ -16,30 +16,15 @@
 
 namespace prep::ipc {
 
-std::string socketPath() {
-    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
-    if (!runtime || !*runtime) throw std::runtime_error("XDG_RUNTIME_DIR is not set; pass a socket path");
-    return std::string(runtime) + "/resize-transition/prep.sock";
-}
-
 int imageMemfd(const cv::Mat& bgr, ImageDesc& desc) {
     CV_Assert(bgr.type() == CV_8UC3);
     desc = {uint32_t(bgr.cols), uint32_t(bgr.rows), uint32_t(bgr.cols * 3), 0, Format::BGR8};
-    size_t bytes = size_t(desc.stride) * desc.height;
-    int fd = memfd_create("resize-prep-image", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) throw std::runtime_error(std::string("memfd_create: ") + std::strerror(errno));
-    if (ftruncate(fd, off_t(bytes)) != 0) throw std::runtime_error("ftruncate image memfd");
-    void* map = mmap(nullptr, bytes, PROT_WRITE, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) throw std::runtime_error("mmap image memfd");
-    for (int y = 0; y < bgr.rows; ++y) std::memcpy(static_cast<uint8_t*>(map) + size_t(y) * desc.stride, bgr.ptr(y), desc.stride);
-    munmap(map, bytes);
-    // Sealed: the worker may map it without trusting the sender to stop writing or to keep the size.
-    fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
-    return fd;
+    cv::Mat packed = bgr.isContinuous() ? bgr : bgr.clone();
+    return sealedMemfd("resize-prep-image", packed.data, size_t(desc.stride) * desc.height);
 }
 
 cv::Mat readImage(int fd, const ImageDesc& desc) {
-    size_t pixel = desc.format == Format::BGR8 ? 3 : desc.format == Format::BGRX8 ? 4 : 0;
+    size_t pixel = desc.format == Format::BGR8 ? 3 : desc.format == Format::BGRX8 || desc.format == Format::RGBX8 ? 4 : 0;
     if (!pixel || desc.width < 2 || desc.height < 2 || desc.width > 8192 || desc.height > 8192 || desc.stride < desc.width * pixel)
         throw std::runtime_error("malformed image descriptor");
     struct stat st{};
@@ -51,52 +36,9 @@ cv::Mat readImage(int fd, const ImageDesc& desc) {
     cv::Mat view(int(desc.height), int(desc.width), pixel == 3 ? CV_8UC3 : CV_8UC4, static_cast<uint8_t*>(map) + desc.offset, desc.stride);
     cv::Mat out;
     if (pixel == 3) out = view.clone();
-    else cv::cvtColor(view, out, cv::COLOR_BGRA2BGR);
+    else cv::cvtColor(view, out, desc.format == Format::RGBX8 ? cv::COLOR_RGBA2BGR : cv::COLOR_BGRA2BGR);
     munmap(map, size_t(st.st_size));
     return out;
-}
-
-void sendPacket(int socket, const void* data, size_t bytes, const int* fds, int count) {
-    iovec iov{const_cast<void*>(data), bytes};
-    msghdr msg{};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int) * 4)] = {};
-    if (count) {
-        msg.msg_control = control;
-        msg.msg_controllen = CMSG_SPACE(sizeof(int) * size_t(count));
-        cmsghdr* c = CMSG_FIRSTHDR(&msg);
-        c->cmsg_level = SOL_SOCKET;
-        c->cmsg_type = SCM_RIGHTS;
-        c->cmsg_len = CMSG_LEN(sizeof(int) * size_t(count));
-        std::memcpy(CMSG_DATA(c), fds, sizeof(int) * size_t(count));
-    }
-    if (sendmsg(socket, &msg, MSG_NOSIGNAL) != ssize_t(bytes)) throw std::runtime_error(std::string("sendmsg: ") + std::strerror(errno));
-}
-
-size_t receivePacket(int socket, void* data, size_t bytes, int* fds, int maxFds, int& received) {
-    iovec iov{data, bytes};
-    msghdr msg{};
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int) * 4)] = {};
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof control;
-    ssize_t n = recvmsg(socket, &msg, MSG_CMSG_CLOEXEC);
-    if (n < 0) throw std::runtime_error(std::string("recvmsg: ") + std::strerror(errno));
-    received = 0;
-    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c))
-        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
-            int count = int((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
-            for (int k = 0; k < count; ++k) {
-                int fd;
-                std::memcpy(&fd, CMSG_DATA(c) + sizeof(int) * size_t(k), sizeof(int));
-                if (received < maxFds) fds[received++] = fd;
-                else close(fd);
-            }
-        }
-    if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) throw std::runtime_error("truncated packet");
-    return size_t(n);
 }
 
 Client::Client(const std::string& path) {
