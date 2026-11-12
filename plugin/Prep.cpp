@@ -204,6 +204,11 @@ void Prep::stop() {
     failure.reset();
 }
 
+bool Prep::running() {
+    std::lock_guard lock{mutex};
+    return up;
+}
+
 const std::string& Prep::workerPath() {
     return path;
 }

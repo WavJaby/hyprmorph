@@ -66,6 +66,10 @@ namespace {
         uint64_t                   resizeNs = 0;
         uint32_t                   candidate = 0, asked = 0, selected = 0;
         bool                       candidateStaged = false;
+        // D3-4: windows whose generations began in one layout pass form a group and leave the hold together. settled = this window is
+        // done waiting: its mesh is in, or none will come (refusal, no worker, images too small).
+        uint64_t                   group = 0;
+        bool                       settled = false, waitCounted = false;
         std::optional<Prep::SAnswer> answer;
         bool                       stageWanted = false;
     };
@@ -94,8 +98,20 @@ namespace {
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
+    // D3-4 group being filled: every generation that begins before the end of the next syncWindows pass joins it -- one layout
+    // recalculation sets all its goals before the next render.preChecks, whether a frame or a client's precommit notices them first.
+    uint64_t openGroup = 1;
+    bool     openGroupUsed = false;
+    // groupReleases = groups of several windows released together; groupWaits = windows that were settled but held for a slower member.
+    struct SGroupCounters {
+        unsigned long groupReleases = 0, groupWaits = 0;
+    } groupCounts;
+
     // Compositor-thread cost of onPreChecks on frames where a transition was attached (capture + thumbnail submit/poll), ms. Logged at unload.
     std::vector<double> preChecksMs;
+
+    struct STracked;
+    PHLWINDOW live(STracked& t);
 
     uint64_t windowId(const PHLWINDOW& w) {
         return reinterpret_cast<uint64_t>(w.get());
@@ -171,6 +187,10 @@ namespace {
         t.candidate = t.asked = t.selected = 0;
         t.candidateStaged = false;
         t.answer.reset();
+        t.group       = openGroup;
+        openGroupUsed = true;
+        t.settled     = !cfgReadiness->value() || !Prep::running();
+        t.waitCounted = false;
         t.stageWanted    = false;
         auto dump        = cfgReadinessDump->value();
         Readiness::beginGeneration(windowId(w), t.generation, t.resizeNs, dump == "[[EMPTY]]" ? "" : dump);
@@ -214,6 +234,10 @@ namespace {
             auto& t = track(w);
             attachSurface(t, w);
             checkGeneration(t, w, "frame");
+        }
+        if (openGroupUsed) {
+            ++openGroup;
+            openGroupUsed = false;
         }
     }
 
@@ -260,9 +284,18 @@ namespace {
             log(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
     }
 
+    // The tracked window, or null once it is gone. A window can be destroyed in the middle of a pass -- rendering a snapshot of another
+    // window lets Hyprland finish a closing one's fade-out -- and its transformer dies with it: the pointer must not be used again.
+    PHLWINDOW live(STracked& t) {
+        auto w = t.window.lock();
+        if (!w)
+            t.transition = nullptr;
+        return w;
+    }
+
     STracked* findTracked(uint64_t id) {
         for (auto& t : tracked)
-            if (const auto w = t->window.lock(); w && windowId(w) == id)
+            if (const auto w = live(*t); w && windowId(w) == id)
                 return t.get();
         return nullptr;
     }
@@ -286,6 +319,7 @@ namespace {
         if (std::min({oldSize.x, oldSize.y, newSize.x, newSize.y}) < 2) {
             ++prepCounts.tooSmall;
             t.stageWanted = false;
+            t.settled     = true;
             return;
         }
         const auto submit = [](const CResizeTransition::SSnapshot& snap, unsigned texture, const Vector2D& size) {
@@ -310,8 +344,8 @@ namespace {
         ++prepCounts.staged;
     }
 
-    // D3-3: the hold ends on mesh ready = the selected candidate's answer is in. The mesh is offered first, while the box is still held:
-    // released, it would be too late.
+    // D3-3: mesh ready = the selected candidate's answer is in. The mesh is offered here, while the box is still held (released, it would
+    // be too late); the hold itself ends in releaseGroups, once the whole group is settled.
     void useAnswer(STracked& t) {
         auto       a = std::move(*t.answer);
         t.answer.reset();
@@ -323,13 +357,44 @@ namespace {
         const bool drawn   = cfgMesh->value() && t.transition->offerMesh({std::move(a.leaves),
                                                                           {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
                                                                           {static_cast<double>(a.newWidth), static_cast<double>(a.newHeight)}});
-        Hold::release(w, now);
+        t.settled = true;
         ++(held ? prepCounts.inHold : prepCounts.afterHold);
         ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
         meshReadyMs.push_back(readyMs);
         log(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
                         a.generation, a.candidate, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
                         drawn ? "mesh drawn" : "plain scale"));
+    }
+
+    // D3-4: a group leaves the hold when every member is settled; until then a settled member waits (its cap still bounds the wait).
+    // A member whose transition ended, or that was retargeted into a newer group, no longer counts.
+    void releaseGroups() {
+        const auto now = Hold::Clock::now();
+        for (auto& first : tracked) {
+            const auto firstWindow = live(*first);
+            if (!first->transition || !Hold::held(firstWindow, now))
+                continue;
+            size_t members = 0, waiting = 0;
+            for (auto& t : tracked)
+                if (live(*t) && t->transition && t->group == first->group) {
+                    ++members;
+                    waiting += !t->settled;
+                }
+            if (waiting) {
+                if (first->settled && !first->waitCounted) {
+                    first->waitCounted = true;
+                    ++groupCounts.groupWaits;
+                }
+                continue;
+            }
+            for (auto& t : tracked)
+                if (const auto w = live(*t); w && t->transition && t->group == first->group)
+                    Hold::release(w, now);
+            if (members > 1) {
+                ++groupCounts.groupReleases;
+                log(std::format("group {}: {} windows released together {:.1f} ms after resize", first->group, members, (nowNs() - first->resizeNs) / 1e6));
+            }
+        }
     }
 
     // A new candidate supersedes the one before: its answer is for a layout the client has left.
@@ -417,8 +482,11 @@ namespace {
     }
 
     void onPrepAnswers() {
-        if (const auto failure = Prep::takeFailure())
+        if (const auto failure = Prep::takeFailure()) {
             log("prep worker down, plain scale from here: " + *failure);
+            for (auto& t : tracked)
+                t->settled = true;
+        }
         for (auto& a : Prep::drain()) {
             auto* const t = findTracked(a.window);
             if (!t || !t->transition || t->generation != a.generation) {
@@ -432,6 +500,7 @@ namespace {
             }
             if (!a.ok) {
                 log(std::format("prep 0x{:x} gen {} candidate {}: refused: {}", a.window, a.generation, a.candidate, a.refusal));
+                t->settled = true;
                 continue;
             }
             t->answer = std::move(a);
@@ -465,9 +534,9 @@ namespace {
         if (const auto gl = g_pHyprRenderer->glBackend())
             gl->makeEGLCurrent();
         for (auto& t : tracked) {
+            const auto w = live(*t);
             if (!t->transition)
                 continue;
-            const auto w = t->window.lock();
             if (!w->m_isMapped) {
                 detach(*t, "window unmapped");
                 continue;
@@ -495,6 +564,7 @@ namespace {
         onReadinessEvents();
         sendStaged();
         onPrepAnswers();
+        releaseGroups();
         if (active)
             preChecksMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }
@@ -572,6 +642,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
                     prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
                     prepCounts.early, prepCounts.inHold, prepCounts.afterHold));
     log(std::format("mesh counters: drawn {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshLate, prepCounts.meshRevoked));
+    log(std::format("group counters: group_releases {} group_waits {}", groupCounts.groupReleases, groupCounts.groupWaits));
     Presenter::destroy();
     if (!meshReadyMs.empty()) {
         std::ranges::sort(meshReadyMs);

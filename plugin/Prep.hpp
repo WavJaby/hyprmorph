@@ -40,6 +40,8 @@ namespace Prep {
     bool start(const std::string& workerPath, std::string& error);
     // Closes the connection, joins the thread (it executes this library's code: must run before unload) and reaps the worker.
     void stop();
+    // A worker is connected: a request made now will be answered (or reported by takeFailure()).
+    bool running();
     // Path of the running or last started worker; empty before the first start().
     const std::string& workerPath();
 
