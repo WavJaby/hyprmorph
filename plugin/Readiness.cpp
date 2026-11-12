@@ -227,7 +227,12 @@ namespace {
     void run() {
         std::unique_lock lock{mutex};
         while (!stopping) {
-            wake.wait_for(lock, std::chrono::duration<double, std::milli>(config.reobserveMs), [] { return stopping || !inputs.empty(); });
+            // The re-observation tick is only for open generations; with none the thread sleeps until the next input.
+            const auto pending = [] { return stopping || !inputs.empty(); };
+            if (generations.empty())
+                wake.wait(lock, pending);
+            else
+                wake.wait_for(lock, std::chrono::duration<double, std::milli>(config.reobserveMs), pending);
             auto batch = std::move(inputs);
             inputs.clear();
             lock.unlock();
