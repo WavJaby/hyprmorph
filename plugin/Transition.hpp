@@ -1,11 +1,12 @@
 // Per-window resize transition: old snapshot + live new content, composed by one Presenter path -- a prepared mesh when one was offered in
 // time, the plain-scale degenerate mesh otherwise (D1-4) -- into a box-sized image that is then drawn like a surface (rounding, alpha).
-// Owned by the window through CWindow::m_transformers while a generation is active; detached (-> native drawing) when it ends or on any error.
+// Owned by the window's transformer list (CWindow::effects().transformers()) while a generation is active; detached (-> native drawing) when it ends or on any error.
 #pragma once
 
 #include "Geometry.hpp"
 
 #include <hyprland/src/render/transformer/Transformer.hpp>
+#include <hyprland/src/render/WindowRenderPresentation.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 
@@ -48,9 +49,18 @@ class CResizeTransition : public Render::IWindowTransformer {
     // true -> a drawn mesh started its ramp out.
     bool                     revokeMesh();
 
-    SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override;
-    void                     preWindowRender(CSurfacePassElement::SRenderData* renderData) override;
-    void                     amendTransformedRenderData(const CBox& currentBox, SMotionBlurData* motionBlur) override;
+    // Removal from the window's transformer list goes through Render::CWindowTransformerList::removeInactive (it has no erase by
+    // pointer): detach() marks the transition inactive, then prunes.
+    void                     deactivate() {
+        m_active = false;
+    }
+    bool                             active() const override {
+        return m_active;
+    }
+    Render::SWindowTransformBuffer   transform(Render::CRenderContext& ctx, const Render::SWindowTransformBuffer& in, const Render::SWindowTransformContext& context) override;
+    void                             preWindowRender(Render::CRenderContext& ctx, CSurfacePassElement::SRenderData* renderData) override;
+    void                             amendTransformedRenderData(Render::CRenderContext& ctx, const CBox& currentBox, SMotionBlurData* motionBlur,
+                                                                const Render::SWindowRenderPresentation& presentation) override;
 
     std::string              m_failure; // last reason the transition gave up, for the log
 
@@ -71,9 +81,10 @@ class CResizeTransition : public Render::IWindowTransformer {
 
     bool                             capture(SSnapshot& out);
     bool                             compose(const Vector2D& boxSize, float weight, double blurPx);
-    void                             drawSnapshot(const SSnapshot& snap, const CBox& box, float alpha);
+    void                             drawSnapshot(Render::CRenderContext& ctx, const SSnapshot& snap, const CBox& box, float alpha);
 
     PHLWINDOWREF                     m_window;
+    bool                             m_active = true;
     SSnapshot                        m_old, m_new;
     SSnapshot                        m_composed; // this frame's Presenter output, contentPx = the animated box in device px
     SP<Render::IFramebuffer>         m_blurPass; // horizontal blur pass of m_composed, read back by the vertical one
@@ -88,7 +99,7 @@ class CResizeTransition : public Render::IWindowTransformer {
     double                           m_join        = 0;
     double                           m_transition  = 0; // t: drives mesh geometry and the old -> new crossfade
     Geometry::SBatch                 m_batches[2];
-    Vector2D                         m_targetAck; // configure size the client must ack (CWindow::sendWindowSize stores goal.floor())
+    Vector2D                         m_targetAck; // configure size the client must ack (CWaylandBackend::configure records the configured size floored)
     bool                             m_newReady    = false; // client acked the target size; m_new is captured every frame from here
     bool                             m_windowOpen  = false; // t reached the crossfade window (with or without new content)
     bool                             m_switching   = false; // old -> new fade started
@@ -98,11 +109,12 @@ class CResizeTransition : public Render::IWindowTransformer {
     float                            m_fade      = 0.F; // 0 = old only, 1 = new only
 
     // Valid only between preWindowRender and amendTransformedRenderData of one renderWindow call: points at that call's local SRenderData.
+    // Pass elements copy SRenderData when created, so restoring alpha there leaves the main surfaces' elements at 0 and popups' visible.
     CSurfacePassElement::SRenderData* m_pendingRenderData = nullptr;
     float                             m_savedAlpha        = 1.F;
 
     // Frame inputs saved in preWindowRender, consumed by transform() later in the same frame.
-    CBox                             m_contentBox; // monitor-local, scaled pixels
+    CBox                             m_contentBox; // monitor-local, scaled pixels; transform() draws it into the canvas at minus the canvas origin
     float                            m_drawAlpha = 1.F;
     int                              m_round     = 0;
     float                            m_roundPower = 2.F;

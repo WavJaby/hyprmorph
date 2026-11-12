@@ -1,6 +1,6 @@
 #include "Hold.hpp"
 
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/helpers/AnimatedVariable.hpp>
 #include <hyprutils/animation/AnimatedVariable.hpp>
 

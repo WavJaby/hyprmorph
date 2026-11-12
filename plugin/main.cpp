@@ -23,7 +23,9 @@
 #include <hyprland/src/config/values/ConfigValues.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowEffectsController.hpp>
+#include <hyprland/src/render/transformer/TransformerList.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/output/Monitor.hpp>
@@ -31,9 +33,12 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -55,12 +60,12 @@ namespace {
     SP<Config::Values::CBoolValue>   cfgMesh;
     SP<Config::Values::CIntValue>    cfgMeshRampMs;
     SP<Config::Values::CBoolValue>   cfgVerbose;
-    SP<SHyprCtlCommand>              statsCommand;
+    SP<IPC::Socket1::SCommand>       statsCommand;
 
     struct STracked {
         PHLWINDOWREF               window;
         Vector2D                   baselineGoal;
-        CResizeTransition*         transition = nullptr; // owned by window->m_transformers; valid while window is alive and attached
+        CResizeTransition*         transition = nullptr; // owned by the window's transformer list; valid while window is alive and attached
         WP<CWLSurfaceResource>     surface;
         CHyprSignalListener        precommit, commit;
         // Readiness bookkeeping: main-surface commits are what makes a thumbnail fresh (desynced subsurfaces are captured but not counted).
@@ -174,7 +179,8 @@ namespace {
         if (!t.transition)
             return;
         if (const auto w = t.window.lock()) {
-            std::erase_if(w->m_transformers, [&](const auto& tr) { return tr.get() == t.transition; });
+            t.transition->deactivate();
+            w->effects().transformers()->removeInactive();
             g_pHyprRenderer->damageWindow(w);
         }
         t.transition = nullptr;
@@ -216,14 +222,17 @@ namespace {
                 return;
             }
         } else {
-            auto transition = makeUnique<CResizeTransition>(w);
+            // The list constructs its transformers itself: a generation that cannot begin leaves it again at once.
+            auto* const transition = w->effects().transformers()->emplace<CResizeTransition>(PHLWINDOWREF{w});
             if (!transition->beginGeneration(goal)) {
-                ++detachReasons[transition->m_failure];
-                trace("native drawing: " + transition->m_failure);
+                const auto reason = transition->m_failure;
+                transition->deactivate();
+                w->effects().transformers()->removeInactive();
+                ++detachReasons[reason];
+                trace("native drawing: " + reason);
                 return;
             }
-            t.transition = transition.get();
-            w->m_transformers.emplace_back(std::move(transition));
+            t.transition = transition;
             g_pHyprRenderer->damageWindow(w);
         }
         hold(w);
@@ -251,7 +260,7 @@ namespace {
         t.commit    = nullptr;
         if (surface) {
             t.precommit = surface->m_events.precommit.listen([raw = &t] {
-                if (const auto win = raw->window.lock(); win && win->m_isMapped)
+                if (const auto win = raw->window.lock(); win && win->mapped())
                     checkGeneration(*raw, win, "precommit");
             });
             t.commit = surface->m_events.commit.listen([raw = &t] { ++raw->commits; });
@@ -275,7 +284,7 @@ namespace {
         std::erase_if(tracked, [](const auto& t) { return t->window.expired(); });
 
         for (const auto& w : Desktop::windowState()->windows()) {
-            if (!w->m_isMapped || w->isHidden())
+            if (!w->mapped() || w->isHidden())
                 continue;
             auto& t = track(w);
             attachSurface(t, w);
@@ -582,11 +591,20 @@ namespace {
         }
     }
 
-    // Worker path: the config value, or the build's default when empty. A changed value restarts the worker.
+    // The prep-worker shipped beside this plugin: <directory of the loaded .so>/prep-worker. Resolved at run time, not baked in at build
+    // time, so the plugin finds its worker wherever it was built or installed (hyprpm builds in its own cache).
+    std::string bundledWorker() {
+        Dl_info self{};
+        if (!dladdr(reinterpret_cast<void*>(&bundledWorker), &self) || !self.dli_fname)
+            return "prep-worker";
+        return (std::filesystem::path{self.dli_fname}.parent_path() / "prep-worker").string();
+    }
+
+    // Worker path: the config value, or the worker beside this plugin when empty. A changed value restarts the worker.
     void syncPrepWorker() {
         auto path = cfgPrepWorker->value();
         if (path.empty() || path == "[[EMPTY]]")
-            path = PREP_WORKER_DEFAULT;
+            path = bundledWorker();
         if (path == Prep::workerPath())
             return;
         std::string error;
@@ -616,7 +634,7 @@ namespace {
             const auto w = live(*t);
             if (!t->transition)
                 continue;
-            if (!w->m_isMapped) {
+            if (!w->mapped()) {
                 detach(*t, "window unmapped");
                 continue;
             }
@@ -745,7 +763,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
                                                                 "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
     cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
-                                                                "Path of the prep-worker executable the plugin runs (empty = the path it was built with)", "");
+                                                                "Path of the prep-worker executable the plugin runs (empty = prep-worker in the directory of the plugin's .so)", "");
     cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
     // 80 ms: D3-5 starting value (M3) for the mesh weight ramp.
     cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
@@ -772,8 +790,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
     preChecksListener = Event::bus()->m_events.render.preChecks.listen([](PHLMONITOR monitor) { onPreChecks(monitor); });
-    statsCommand = HyprlandAPI::registerHyprCtlCommand(handle, SHyprCtlCommand{.name = "resize-transition", .exact = true,
-                                                                               .fn = [](eHyprCtlOutputFormat, std::string) { return statsJson(); }});
+    statsCommand = HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{.name    = "resize-transition",
+                                                                                      .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
+                                                                                      .handler = [](const IPC::Socket1::SRequest&) { return IPC::Socket1::SResponse{statsJson()}; }});
     trace("loaded");
     return {"resize-transition", "Plain-scale resize transition with old snapshot and crossfade", "wavjaby", "0.1"};
 }

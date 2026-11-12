@@ -2,10 +2,10 @@
 
 #include "Presenter.hpp"
 
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowBackend.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
-#include <hyprland/src/protocols/XDGShell.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/gl/GLFramebuffer.hpp>
 #include <hyprland/src/render/pass/ClearPassElement.hpp>
@@ -17,14 +17,14 @@
 using namespace std::chrono;
 
 namespace {
-    // Hyprland's "no custom UV" sentinel for m_renderData.primarySurfaceUV*.
+    // Hyprland's "no custom UV" sentinel for SRenderData::primarySurfaceUV*.
     const Vector2D UV_UNSET{-1, -1};
 
     // Old/new switch: the t where Geometry::build's two sides meet at the midpoint layout. The crossfade starts here.
     constexpr double SWITCH_AT = .5;
 
-    void setCustomUV(const Vector2D& topLeft, const Vector2D& bottomRight) {
-        auto& rd                       = g_pHyprRenderer->m_renderData;
+    void setCustomUV(Render::CRenderContext& ctx, const Vector2D& topLeft, const Vector2D& bottomRight) {
+        auto& rd                       = ctx.m_data;
         rd.primarySurfaceUVTopLeft     = topLeft;
         rd.primarySurfaceUVBottomRight = bottomRight;
     }
@@ -43,12 +43,12 @@ CResizeTransition::~CResizeTransition() = default;
 // Called outside any render pass: from precommit (client dispatch) or render.preChecks (before beginRender), like makeSnapshotFB() at unmap.
 bool CResizeTransition::capture(SSnapshot& out) {
     const auto window = m_window.lock();
-    if (!window || !window->m_isMapped) {
+    if (!window || !window->mapped()) {
         m_failure = "window gone";
         return false;
     }
     // F11 scope: X11 has no xdg ack to detect the new buffer; rotated outputs break the monitor-local crop below.
-    if (window->m_isX11 || !window->m_xdgSurface) {
+    if (window->backend().isX11()) {
         m_failure = "X11 window";
         return false;
     }
@@ -68,7 +68,7 @@ bool CResizeTransition::capture(SSnapshot& out) {
     }
 
     // Content box = xdg geometry (excludes client-side shadows); maps 1:1 onto the window box when presented.
-    CBox geometry = window->m_xdgSurface->m_current.geometry;
+    CBox geometry = window->backend().geometry().box;
     if (geometry.empty())
         geometry = CBox{{}, surface->m_current.size};
     const Vector2D contentPx = (geometry.size() * monitor->m_scale).round();
@@ -91,7 +91,8 @@ bool CResizeTransition::capture(SSnapshot& out) {
         m_failure = "beginFullFakeRender failed";
         return false;
     }
-    g_pHyprRenderer->draw(CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
+    auto& ctx = g_pHyprRenderer->context(); // the context beginFullFakeRender just opened; draw() renders immediately into its fb
+    g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{CHyprColor(0, 0, 0, 0)});
 
     bool texturesOk = true;
     surface->breadthfirst(
@@ -106,19 +107,19 @@ bool CResizeTransition::capture(SSnapshot& out) {
             // Same viewport-source UV as IElementRenderer::calculateUVForSurface, minus its window-size stretch/crop (the F12 cause).
             if (state.viewport.hasSource && state.bufferSize.x > 0 && state.bufferSize.y > 0) {
                 const auto& src = state.viewport.source;
-                setCustomUV(src.pos() / state.bufferSize, (src.pos() + src.size()) / state.bufferSize);
+                setCustomUV(ctx, src.pos() / state.bufferSize, (src.pos() + src.size()) / state.bufferSize);
             } else
-                setCustomUV(UV_UNSET, UV_UNSET);
+                setCustomUV(ctx, UV_UNSET, UV_UNSET);
             CBox box = CBox{offset - geometry.pos(), state.size}.scale(monitor->m_scale).round();
             CTexPassElement::SRenderData data;
             data.tex           = state.texture;
             data.box           = box;
             data.allowCustomUV = true;
             data.surface       = s;
-            g_pHyprRenderer->draw(data, CRegion{box});
+            g_pHyprRenderer->draw(ctx, data, CRegion{box});
         },
         nullptr);
-    setCustomUV(UV_UNSET, UV_UNSET);
+    setCustomUV(ctx, UV_UNSET, UV_UNSET);
     g_pHyprRenderer->endRender();
 
     if (!texturesOk) {
@@ -255,13 +256,13 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
 
 bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held) {
     const auto window = m_window.lock();
-    if (!window || !window->m_isMapped) {
+    if (!window || !window->mapped()) {
         m_failure = "window gone";
         return false;
     }
     const auto now = steady_clock::now();
 
-    // ackedSize lands in m_current with the first commit after ack_configure (CWindow::onAck). That buffer can still be a client-side
+    // ackedSize lands in m_current with the first commit after ack_configure (CWaylandBackend::acknowledgeConfigure). That buffer can still be a client-side
     // transitional frame (kitty: old cells at top-left, rest blank) -- readiness judges it from the captured m_new, also during a hold.
     if (!m_newReady) {
         const auto surface = window->resource();
@@ -329,9 +330,11 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
     return true;
 }
 
-void CResizeTransition::preWindowRender(CSurfacePassElement::SRenderData* renderData) {
+void CResizeTransition::preWindowRender(Render::CRenderContext& ctx, CSurfacePassElement::SRenderData* renderData) {
     m_frameValid = false;
-    if (!renderData || !m_composed.fb)
+    // A snapshot (makeWindowSnapshot) skips transform() and amendTransformedRenderData: hiding the surfaces there would leave the snapshot
+    // blank, so it gets the native surfaces.
+    if (!renderData || !m_composed.fb || ctx.m_renderingSnapshot)
         return;
     const auto monitor = renderData->pMonitor.lock();
     if (!monitor)
@@ -352,17 +355,17 @@ void CResizeTransition::preWindowRender(CSurfacePassElement::SRenderData* render
     renderData->alpha   = 0.F;
 }
 
-void CResizeTransition::amendTransformedRenderData(const CBox&, SMotionBlurData*) {
+void CResizeTransition::amendTransformedRenderData(Render::CRenderContext&, const CBox&, SMotionBlurData*, const Render::SWindowRenderPresentation&) {
     if (!m_pendingRenderData)
         return;
     m_pendingRenderData->alpha = m_savedAlpha;
     m_pendingRenderData        = nullptr;
 }
 
-void CResizeTransition::drawSnapshot(const SSnapshot& snap, const CBox& box, float alpha) {
+void CResizeTransition::drawSnapshot(Render::CRenderContext& ctx, const SSnapshot& snap, const CBox& box, float alpha) {
     if (!snap.fb || alpha <= 0.F)
         return;
-    setCustomUV({0, 0}, snap.contentPx / snap.fb->m_size);
+    setCustomUV(ctx, {0, 0}, snap.contentPx / snap.fb->m_size);
     CTexPassElement::SRenderData data;
     data.tex           = snap.fb->getTexture();
     data.box           = box;
@@ -370,16 +373,18 @@ void CResizeTransition::drawSnapshot(const SSnapshot& snap, const CBox& box, flo
     data.round         = m_round;
     data.roundingPower = m_roundPower;
     data.allowCustomUV = true;
-    g_pHyprRenderer->draw(data, CRegion{box});
-    setCustomUV(UV_UNSET, UV_UNSET);
+    g_pHyprRenderer->draw(ctx, data, CRegion{box});
+    setCustomUV(ctx, UV_UNSET, UV_UNSET);
 }
 
-// The composed image, scaled to the animated content box (1:1 but for sub-pixel rounding). `in` is already bound by drawTransformedWindow.
-SP<Render::IFramebuffer> CResizeTransition::transform(SP<Render::IFramebuffer> in) {
+// The composed image, scaled to the animated content box (1:1 but for sub-pixel rounding), drawn into the window's canvas: drawTransformedWindow
+// has `in` bound with the canvas projection, in.box = the canvas in monitor-local px. The first call of a frame is the window content; a
+// second one (window blur on) is the blur alpha matte, whose white window box already covers the content box: left as it is.
+Render::SWindowTransformBuffer CResizeTransition::transform(Render::CRenderContext& ctx, const Render::SWindowTransformBuffer& in, const Render::SWindowTransformContext&) {
     if (!m_frameValid)
         return in;
     m_frameValid = false;
 
-    drawSnapshot(m_composed, m_contentBox, m_drawAlpha);
+    drawSnapshot(ctx, m_composed, m_contentBox.copy().translate(-in.box.pos()), m_drawAlpha);
     return in;
 }
