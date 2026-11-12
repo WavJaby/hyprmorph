@@ -67,37 +67,7 @@ double Preparer::warm() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
-namespace {
-
-json::Value pairsJson(const std::vector<Pair>& pairs) {
-    json::Array out;
-    for (auto& p : pairs) out.push_back(p.toJson());
-    return out;
-}
-
-json::Value pointsJson(const Points& points) {
-    json::Array out;
-    for (auto& p : points) out.push_back(json::Array{double(p.x), double(p.y)});
-    return out;
-}
-
-json::Value proposalsJson(const std::vector<Proposal>& proposals) {
-    json::Array out;
-    for (auto& p : proposals) out.push_back(p.toJson());
-    return out;
-}
-
-json::Value splitsJson(const std::vector<Split>& splits) {
-    json::Array out;
-    for (auto& s : splits) out.push_back(s.toJson());
-    return out;
-}
-
-json::Value optional(const std::optional<double>& v) { return v ? json::Value(*v) : json::Value(); }
-
-} // namespace
-
-Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Config& config, const StageHook& hook) {
+Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Config& config) {
     using Clock = std::chrono::steady_clock;
     Result out;
     auto started = Clock::now();
@@ -106,16 +76,12 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
         out.timings.emplace_back(name, std::chrono::duration<double, std::milli>(now - started).count());
         started = now;
     };
-    auto report = [&](const std::string& stage, const json::Value& extra) {
-        if (hook) hook(stage, out.leaves, extra);
-    };
     cv::setRNGSeed(int(RNG_SEED));
     Shape oldShape{oldImage.cols, oldImage.rows}, newShape{newImage.cols, newImage.rows};
 
     Points source, target;
     matchImages(oldImage, newImage, source, target);
     lap("matching");
-    report("matching", json::Value(json::Object{{"source", pointsJson(source)}, {"target", pointsJson(target)}}));
 
     // Per-image work with no shared state runs the old image on a second thread (results identical by construction;
     // none of it draws from the RNG, which only RANSAC on this thread uses).
@@ -157,30 +123,11 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
         if (std::any_of(chosen.leaves.begin(), chosen.leaves.end(), [&](const Leaf& l) { return containedPair(p, l); })) refine.push_back(p);
     refineRegions(oldImage, newImage, chosen.leaves, refine);
     lap("fits");
-    json::Value baselineSplits = splitsJson(baseline.splits), jointSplits = splitsJson(joint.splits);
     out.leaves = std::move(chosen.leaves);
     out.splits = std::move(chosen.splits);
     {
         json::Array relaidJson;
         for (auto& n : relaid) relaidJson.push_back(n);
-        json::Value extra = json::Value::object();
-        extra.set("old_regions", proposalsJson(oldProposals.regions));
-        extra.set("new_regions", proposalsJson(newProposals.regions));
-        extra.set("old_small", proposalsJson(oldProposals.small));
-        extra.set("new_small", proposalsJson(newProposals.small));
-        extra.set("coarse", pairsJson(coarse));
-        extra.set("small", pairsJson(small));
-        extra.set("trusted_source", pointsJson(trustedSource));
-        extra.set("selected", selected);
-        extra.set("reason", reason);
-        extra.set("base_contour", optional(baseContour));
-        extra.set("guided_contour", optional(jointContour));
-        extra.set("base_landmark", optional(baseLandmark));
-        extra.set("guided_landmark", optional(jointLandmark));
-        extra.set("baseline_splits", baselineSplits);
-        extra.set("guided_splits", jointSplits);
-        extra.set("relayout", relaidJson);
-        report("partition", extra);
         out.evidence.set("selected_partition", selected);
         out.evidence.set("selection_reason", reason);
         out.evidence.set("regions", int(out.leaves.size()));
@@ -197,16 +144,13 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
             rigid.prepare(oldImage, newImage, out.leaves);
             int strips = rigid.strips(out.leaves);
             lap("rigid_strips");
-            report("rigid_strips", json::Value());
             int patches = rigid.patches(oldImage, newImage, out.leaves);
             lap("gpu_patches");
-            report("gpu_patches", json::Value());
             out.evidence.set("rigid_strips_accepted", strips);
             out.evidence.set("gpu_patch_strips_accepted", patches);
         } else if (stage == "flat") {
             auto results = applyFlatAbsorb(oldImage, newImage, out.leaves, source, target);
             lap("flat_absorb");
-            report("flat_absorb", json::Value());
             int accepted = 0;
             json::Array unabsorbed, background;
             for (auto& r : results) {
@@ -220,7 +164,6 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
         } else if (stage == "constraints") {
             auto results = applyPointConstraints(oldImage, newImage, out.leaves, source, target, cg);
             lap("point_constraints");
-            report("point_constraints", json::Value());
             int accepted = 0;
             for (auto& r : results) accepted += r.accepted;
             out.evidence.set("constraint_regions_accepted", accepted);

@@ -33,15 +33,12 @@ struct Result {
     double prepMs() const;
 };
 
-// Called after each stage with the stage name and the current leaves (parity harness hook).
-using StageHook = std::function<void(const std::string&, const std::vector<Leaf>&, const json::Value& extra)>;
-
 class Preparer {
 public:
     explicit Preparer(gles::Context& context);
     // RANSAC draws from OpenCV's thread RNG: seeded here per run, so a case's result never depends on earlier runs.
     static constexpr uint64_t RNG_SEED = 20261019;
-    Result run(const cv::Mat& oldImage, const cv::Mat& newImage, const Config& config, const StageHook& hook = {});
+    Result run(const cv::Mat& oldImage, const cv::Mat& newImage, const Config& config);
     // First dispatch of each kernel pays the driver's shader JIT, and OpenCV pays first-use costs (measured: a cold
     // first request ~430-510 ms vs ~85 ms warm): run both once on synthetic data at startup. Returns elapsed ms.
     double warm();
