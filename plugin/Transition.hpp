@@ -19,6 +19,7 @@ struct STransitionConfig {
     long   crossfadeMs;        // fade length when the new-size buffer arrives after that window opened
     long   newBufferTimeoutMs; // after the size animation ends, wait this long for the new-size buffer, then native
     long   meshRampMs;         // D3-5 mesh weight ramp on a revoke
+    double crossfadeBlurPx;    // D3-1 peak Gaussian sigma, logical px, at the middle of the crossfade (0 = off)
 };
 
 // A prepared mesh: leaves in analysis px of the two images the prep worker was given.
@@ -69,12 +70,13 @@ class CResizeTransition : public Render::IWindowTransformer {
   private:
 
     bool                             capture(SSnapshot& out);
-    bool                             compose(const Vector2D& boxSize, float weight);
+    bool                             compose(const Vector2D& boxSize, float weight, double blurPx);
     void                             drawSnapshot(const SSnapshot& snap, const CBox& box, float alpha);
 
     PHLWINDOWREF                     m_window;
     SSnapshot                        m_old, m_new;
     SSnapshot                        m_composed; // this frame's Presenter output, contentPx = the animated box in device px
+    SP<Render::IFramebuffer>         m_blurPass; // horizontal blur pass of m_composed, read back by the vertical one
     std::optional<SMesh>             m_mesh;
     bool                             m_moving  = false; // the box has left its begin size (first frame not held)
     bool                             m_revoked = false;

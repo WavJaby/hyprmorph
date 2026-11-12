@@ -2,13 +2,16 @@
 
 #include <GLES3/gl31.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <string>
 
 namespace {
-    GLuint      program = 0, vao = 0, vbo = 0, ibo = 0, sampler = 0;
-    GLint       uExtent = -1, uOpacity = -1, uSource = -1;
+    GLuint      program = 0, vao = 0, vbo = 0, ibo = 0, sampler = 0, blurProgram = 0;
+    GLint       uExtent = -1, uOpacity = -1, uSource = -1, uBlurSource = -1, uBlurSigma = -1, uBlurAxis = -1, uBlurSize = -1;
+    // Taps each side: 3 sigma holds 99.7 % of the kernel; sigma beyond MAX_TAPS / 3 is clamped (the shader loop is fixed-bound).
+    constexpr int MAX_TAPS = 12;
     bool        initTried = false;
     std::string failureText;
 
@@ -79,6 +82,29 @@ namespace {
         return shader;
     }
 
+    GLuint link(const char* vertex, const char* fragment) {
+        const GLuint vs = compile(GL_VERTEX_SHADER, vertex), fs = vs ? compile(GL_FRAGMENT_SHADER, fragment) : 0;
+        if (!vs || !fs) {
+            if (vs)
+                glDeleteShader(vs);
+            return 0;
+        }
+        GLuint linked = glCreateProgram();
+        glAttachShader(linked, vs);
+        glAttachShader(linked, fs);
+        glLinkProgram(linked);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        GLint ok = 0;
+        glGetProgramiv(linked, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            failureText = "presenter program link failed";
+            glDeleteProgram(linked);
+            return 0;
+        }
+        return linked;
+    }
+
     bool init() {
         initTried                    = true;
         constexpr const char* VERTEX = R"(#version 310 es
@@ -101,24 +127,40 @@ namespace {
             void main() {
                 color = texture(sourceImage, uv) * opacity;
             })";
-        const GLuint vs = compile(GL_VERTEX_SHADER, VERTEX), fs = vs ? compile(GL_FRAGMENT_SHADER, FRAGMENT) : 0;
-        if (!vs || !fs) {
-            if (vs)
-                glDeleteShader(vs);
+        // Blur: a full-target triangle; texelFetch keeps source and target pixels 1:1 (same row convention, no extents involved).
+        constexpr const char* BLUR_VERTEX = R"(#version 310 es
+            precision highp float;
+            void main() {
+                vec2 corner = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+                gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+            })";
+        constexpr const char* BLUR_FRAGMENT = R"(#version 310 es
+            precision highp float;
+            uniform sampler2D sourceImage;
+            uniform float sigma;
+            uniform ivec2 axis, size;
+            layout(location=0) out vec4 color;
+            const int MAX_TAPS = 12;
+            void main() {
+                ivec2 p = ivec2(gl_FragCoord.xy);
+                vec4 sum = texelFetch(sourceImage, p, 0);
+                float total = 1.0;
+                for (int k = 1; k <= MAX_TAPS; ++k) {
+                    float w = exp(-float(k * k) / (2.0 * sigma * sigma));
+                    sum += w * (texelFetch(sourceImage, clamp(p + k * axis, ivec2(0), size - 1), 0) +
+                                texelFetch(sourceImage, clamp(p - k * axis, ivec2(0), size - 1), 0));
+                    total += 2.0 * w;
+                }
+                color = sum / total;
+            })";
+        program     = link(VERTEX, FRAGMENT);
+        blurProgram = program ? link(BLUR_VERTEX, BLUR_FRAGMENT) : 0;
+        if (!program || !blurProgram)
             return false;
-        }
-        program = glCreateProgram();
-        glAttachShader(program, vs);
-        glAttachShader(program, fs);
-        glLinkProgram(program);
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        GLint ok = 0;
-        glGetProgramiv(program, GL_LINK_STATUS, &ok);
-        if (!ok) {
-            failureText = "presenter program link failed";
-            return false;
-        }
+        uBlurSource = glGetUniformLocation(blurProgram, "sourceImage");
+        uBlurSigma  = glGetUniformLocation(blurProgram, "sigma");
+        uBlurAxis   = glGetUniformLocation(blurProgram, "axis");
+        uBlurSize   = glGetUniformLocation(blurProgram, "size");
         uExtent  = glGetUniformLocation(program, "extent");
         uOpacity = glGetUniformLocation(program, "opacity");
         uSource  = glGetUniformLocation(program, "sourceImage");
@@ -186,7 +228,41 @@ bool Presenter::compose(unsigned framebuffer, int width, int height, std::span<c
     return true;
 }
 
+bool Presenter::blur(unsigned texture, unsigned framebuffer, int width, int height, float sigma, bool horizontal) {
+    if (!failureText.empty())
+        return false;
+    SSavedState saved;
+    if (!initTried && !init())
+        return false;
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    glViewport(0, 0, width, height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, width, height);
+    glUseProgram(blurProgram);
+    glUniform1i(uBlurSource, 0);
+    glUniform1f(uBlurSigma, std::clamp(sigma, .01F, MAX_TAPS / 3.F));
+    glUniform2i(uBlurAxis, horizontal ? 1 : 0, horizontal ? 0 : 1);
+    glUniform2i(uBlurSize, width, height);
+    glActiveTexture(GL_TEXTURE0);
+    glBindSampler(0, 0); // texelFetch ignores sampler state; unbinding keeps the texture's own state out of the question
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glBindVertexArray(vao); // any VAO: the vertex shader reads no attribute
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (glGetError() != GL_NO_ERROR) {
+        failureText = "presenter blur raised a GL error";
+        return false;
+    }
+    return true;
+}
+
 void Presenter::destroy() {
+    if (blurProgram)
+        glDeleteProgram(blurProgram);
     if (program)
         glDeleteProgram(program);
     if (vao)
@@ -197,7 +273,7 @@ void Presenter::destroy() {
         glDeleteBuffers(1, &ibo);
     if (sampler)
         glDeleteSamplers(1, &sampler);
-    program = vao = vbo = ibo = sampler = 0;
+    program = vao = vbo = ibo = sampler = blurProgram = 0;
     initTried = false;
     failureText.clear();
 }

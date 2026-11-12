@@ -12,6 +12,7 @@
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 using namespace std::chrono;
 
@@ -172,7 +173,7 @@ bool CResizeTransition::revokeMesh() {
 }
 
 // Presenter: old and new content through the mesh (or the degenerate one) at m_transition, summed by the fade, into m_composed.
-bool CResizeTransition::compose(const Vector2D& boxSize, float weight) {
+bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double blurPx) {
     const auto window  = m_window.lock();
     const auto monitor = window->m_monitor.lock();
     if (!monitor) {
@@ -227,8 +228,26 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight) {
     add(Geometry::OLD, m_old, showNew ? 1.F - m_fade : 1.F);
     if (showNew)
         add(Geometry::NEW, m_new, m_fade);
-    if (!Presenter::compose(target->getFBID(), sc<int>(m_composed.contentPx.x), sc<int>(m_composed.contentPx.y), std::span{layers, count})) {
+    const int width = sc<int>(m_composed.contentPx.x), height = sc<int>(m_composed.contentPx.y);
+    if (!Presenter::compose(target->getFBID(), width, height, std::span{layers, count})) {
         m_failure = Presenter::failure();
+        return false;
+    }
+    if (blurPx <= 0.)
+        return true;
+    // D3-1: soften the summed layers while both are on screen (linear, so the same as blurring each). Plain Gaussian over the whole box:
+    // flat regions are unchanged by it, region edges soften by the same sigma -- D3-1 asks them sharp; a detail-only blur is not built.
+    if (!m_blurPass)
+        m_blurPass = g_pHyprRenderer->createFB("resize-transition blur");
+    if (m_blurPass->m_size != monitor->m_pixelSize && !m_blurPass->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
+        m_failure = "framebuffer alloc failed";
+        return false;
+    }
+    auto* const pass = dynamic_cast<Render::GL::CGLFramebuffer*>(m_blurPass.get());
+    const float sigma = sc<float>(blurPx * monitor->m_scale);
+    if (!pass || !Presenter::blur(m_composed.fb->getTexture()->m_texID, pass->getFBID(), width, height, sigma, true) ||
+        !Presenter::blur(m_blurPass->getTexture()->m_texID, target->getFBID(), width, height, sigma, false)) {
+        m_failure = pass ? Presenter::failure() : "renderer is not OpenGL";
         return false;
     }
     return true;
@@ -286,7 +305,9 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
         else
             m_fade = config.crossfadeSpan <= 0 ? 1.F : std::clamp(sc<float>((m_transition - fadeStart) / config.crossfadeSpan), 0.F, 1.F);
     }
-    if (!compose(size, weight))
+    // D3-1 blur schedule: 0 at both ends of the fade, peak in its middle (the 2026-09-24 study's sin(pi f)^0.8).
+    const double blurPx = m_fade > 0.F && m_fade < 1.F ? config.crossfadeBlurPx * std::pow(std::sin(M_PI * m_fade), .8) : 0.;
+    if (!compose(size, weight, blurPx))
         return false;
 
     const bool animating = window->sizeAnimation()->isBeingAnimated();

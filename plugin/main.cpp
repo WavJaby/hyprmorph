@@ -46,6 +46,7 @@ namespace {
     SP<Config::Values::CBoolValue> cfgEnabled;
     SP<Config::Values::CFloatValue> cfgCrossfadeSpan;
     SP<Config::Values::CIntValue>  cfgCrossfadeMs;
+    SP<Config::Values::CFloatValue> cfgCrossfadeBlurPx;
     SP<Config::Values::CIntValue>  cfgNewBufferTimeoutMs;
     SP<Config::Values::CIntValue>  cfgHoldMs;
     SP<Config::Values::CBoolValue>   cfgReadiness;
@@ -393,7 +394,8 @@ namespace {
         return {.crossfadeSpan      = cfgCrossfadeSpan->value(),
                 .crossfadeMs        = cfgCrossfadeMs->value(),
                 .newBufferTimeoutMs = cfgNewBufferTimeoutMs->value(),
-                .meshRampMs         = cfgMeshRampMs->value()};
+                .meshRampMs         = cfgMeshRampMs->value(),
+                .crossfadeBlurPx    = cfgCrossfadeBlurPx->value()};
     }
 
     // D3-3: mesh ready = the selected candidate's answer is in. Offered here: during the hold it plays from the box's start, after it the
@@ -722,6 +724,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgCrossfadeSpan = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_span",
                                                                "Old-to-new crossfade length in transition progress (0..1), starting at the old/new switch at 0.5", .3F,
                                                                Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
+    // 1.5 px: D3-1 starting value (M3), from the 2026-09-24 synthetic study, where 12 px made text indistinct.
+    cfgCrossfadeBlurPx = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_blur_px",
+                                                                 "Peak blur (Gaussian sigma, logical px) of the content in the middle of the old/new crossfade (0 = off)",
+                                                                 1.5F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 4.F});
     // 100 ms: D3-1 starting value (M3); now only for new content that arrives after the crossfade window opened.
     cfgCrossfadeMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:crossfade_ms",
                                                            "Old-to-new crossfade length in ms when the new-size buffer arrives after the crossfade window opened", 100,
@@ -747,7 +753,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
                                                           Config::Values::SIntValueOptions{.min = 0});
     cfgVerbose    = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:verbose",
                                                          "Write per-resize events to the Hyprland log (0 = warnings only; counters: hyprctl resize-transition)", false);
-    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeSpan), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
+    for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeSpan), SP<Config::Values::IValue>(cfgCrossfadeMs),
+                              SP<Config::Values::IValue>(cfgCrossfadeBlurPx), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
                               SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
                               SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs),
                               SP<Config::Values::IValue>(cfgVerbose)})

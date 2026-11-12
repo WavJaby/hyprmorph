@@ -19,6 +19,9 @@ namespace Presenter {
     // Clears (0, 0)-(width, height) of `framebuffer` to transparent and draws the layers into it, batch position 0..1 spanning that rect.
     // false -> GL setup failed, reason in failure(); nothing usable was drawn.
     bool        compose(unsigned framebuffer, int width, int height, std::span<const SLayer> layers);
+    // D3-1 detail softening: one pass of a separable Gaussian (sigma in target px) over (0, 0)-(width, height) of `texture` into the same rect
+    // of `framebuffer`; run it horizontally, then vertically. Linear, so blurring the summed crossfade equals blurring each layer.
+    bool        blur(unsigned texture, unsigned framebuffer, int width, int height, float sigma, bool horizontal);
     void        destroy();
     const char* failure(); // empty while working
 }
