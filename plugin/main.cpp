@@ -730,9 +730,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:new_buffer_timeout_ms",
                                                                   "After the size animation ends, ms to keep the scaled old snapshot while waiting for the new-size buffer",
                                                                   300, Config::Values::SIntValueOptions{.min = 0});
-    // 200 ms: D3-3 cap chosen by the user; readiness 75-160 ms + prep ~92 ms often exceeds it. 0 = no hold.
+    // 300 ms: D3-3 cap (user, 2026-11-12; was 200). Electron chat clients have their mesh at ~245-315 ms, 200 ms + the ~62 ms join window
+    // missed most of them; a client whose mesh is ready earlier releases the hold then, so only slow clients pay the extra wait. 0 = no hold.
     cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:hold_ms",
-                                                      "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 200,
+                                                      "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 300,
                                                       Config::Values::SIntValueOptions{.min = 0});
     cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:readiness", "Sample new content and run the readiness detector (0 = off)", true);
     cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
