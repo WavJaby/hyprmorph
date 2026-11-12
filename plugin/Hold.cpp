@@ -66,8 +66,7 @@ namespace {
         const auto now = Hold::Clock::now();
         if (it->var->goal() != it->goal || it->var->begun() != it->begun) {
             // Re-begun before begin() saw it: Hyprland's animation tick runs on a timer and can step between the new goal and the next
-            // render.preChecks. Still held -> adopt the new motion at its start, same deadline (begin() then re-creates it). Released ->
-            // stock clock from the new begin, entry kept so begin() still sees this motion's spent budget.
+            // render.preChecks. Still held -> adopt the new motion at its start, same deadline (begin() then re-creates it).
             if (now < it->releaseAt) {
                 ++counts.adopted;
                 it->begun   = it->var->begun();
@@ -75,6 +74,15 @@ namespace {
                 it->percent = 0.F;
                 return 0.F;
             }
+            // Released -> stock clock. Re-begun at the old goal = that motion had finished and this is an unrelated one (a move with
+            // no resize): its budget is history, forget it -- kept, the next resize would look like a retarget of a spent motion and
+            // get no hold. Re-begun elsewhere = a retarget mid-motion: follow it, so begin() still sees the spent budget.
+            if (it->var->begun() == it->goal) {
+                entries.erase(it);
+                return original(self);
+            }
+            it->begun = it->var->begun();
+            it->goal  = it->var->goal();
             return original(self);
         }
 
