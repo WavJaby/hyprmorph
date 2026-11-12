@@ -1,5 +1,6 @@
 #pragma once
-// Separable content-preserving leaf meshes, D4-1 isotropic shrink (port of experiments/flat_absorb.py).
+// Separable content-preserving leaf meshes, D4-1 isotropic shrink (port of experiments/flat_absorb.py), plus D4-1 on axes
+// with no flat run: a short identical-line run at the free end absorbs instead of a single-axis stretch (not in the reference).
 #include "points.hpp"
 #include "types.hpp"
 
@@ -14,7 +15,8 @@ struct FlatResult {
     std::string name;
     bool accepted = false;
     double contentScale = 1;
-    std::vector<std::string> unabsorbed;
+    std::vector<std::string> unabsorbed;  // sides whose content stays anisotropic: an axis with no identical lines is forced
+    std::vector<std::string> background;  // "<side>-<axis>-<attached end>": axes with no flat run whose background run absorbs
 };
 
 // Gives every leaf still drawn by plain scaling a flat-absorbing mesh, in place.

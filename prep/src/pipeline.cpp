@@ -208,13 +208,15 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
             lap("flat_absorb");
             report("flat_absorb", json::Value());
             int accepted = 0;
-            json::Array unabsorbed;
+            json::Array unabsorbed, background;
             for (auto& r : results) {
                 accepted += r.accepted;
                 if (!r.unabsorbed.empty()) unabsorbed.push_back(r.name);
+                for (auto& b : r.background) background.push_back(r.name + ":" + b);
             }
             out.evidence.set("flat_absorb_accepted", accepted);
             out.evidence.set("flat_unabsorbed", unabsorbed);
+            out.evidence.set("flat_background", background);
         } else if (stage == "constraints") {
             auto results = applyPointConstraints(oldImage, newImage, out.leaves, source, target, cg);
             lap("point_constraints");

@@ -17,7 +17,8 @@ constexpr int FLAT_STEP = 4, MIN_FLAT_RUN = 3, VERTEX_SPACING = 24, MIN_SCALE_EV
 constexpr double MIN_FLAT_SCALE = .2;
 const double NATIVE_SCALE_TOLERANCE = std::log(1.05);
 
-std::vector<uint8_t> flatIntervals(const cv::Mat& patch, int axis) {
+// Per interval between adjacent lines: the two lines are identical (every pixel within FLAT_STEP).
+std::vector<uint8_t> identicalIntervals(const cv::Mat& patch, int axis) {
     int lines = axis ? patch.rows : patch.cols, across = axis ? patch.cols : patch.rows;
     std::vector<uint8_t> flat(size_t(lines - 1));
     for (int k = 0; k + 1 < lines; ++k) {
@@ -29,6 +30,10 @@ std::vector<uint8_t> flatIntervals(const cv::Mat& patch, int axis) {
         }
         flat[size_t(k)] = step < FLAT_STEP;
     }
+    return flat;
+}
+
+std::vector<uint8_t> flatIntervals(std::vector<uint8_t> flat) {
     // Short flat runs are inter-glyph gaps: back to content.
     for (size_t i = 0; i < flat.size();) {
         if (!flat[i]) { ++i; continue; }
@@ -37,6 +42,37 @@ std::vector<uint8_t> flatIntervals(const cv::Mat& patch, int axis) {
         if (j - i < size_t(MIN_FLAT_RUN)) std::fill(flat.begin() + long(i), flat.begin() + long(j), 0);
         i = j;
     }
+    return flat;
+}
+
+// Which end of an axis the content stays attached to when the leaf resizes: the end at which the old and new line
+// profiles (mean colour of each line) agree better over their common length. Revealed or hidden content sits at the
+// other end (a top-anchored list growing shows more items at the bottom). Equal agreement -> start.
+bool attachedToEnd(const cv::Mat& a, const cv::Mat& b, int axis) {
+    cv::Mat pa, pb;
+    // reduce dim 0 collapses rows -> one value per column (axis 0 lines); dim 1 -> one per row (axis 1 lines).
+    cv::reduce(a, pa, axis ? 1 : 0, cv::REDUCE_AVG, CV_64F);
+    cv::reduce(b, pb, axis ? 1 : 0, cv::REDUCE_AVG, CV_64F);
+    pa = pa.reshape(1, int(pa.total()));
+    pb = pb.reshape(1, int(pb.total()));
+    int la = pa.rows / 3, lb = pb.rows / 3, m = std::min(la, lb);
+    double start = 0, end = 0;
+    for (int i = 0; i < m * 3; ++i) {
+        start += std::fabs(pa.at<double>(i) - pb.at<double>(i));
+        end += std::fabs(pa.at<double>((la - m) * 3 + i) - pb.at<double>((lb - m) * 3 + i));
+    }
+    return end < start;
+}
+
+// D4-1 leftover on an axis with no flat run: the identical-line run nearest the free end (one demoted as an
+// inter-glyph gap) becomes the axis's flat span, so the region's own background takes the size change instead of a
+// single-axis stretch of the content. All-zero when the axis has no identical lines at all (stays forced).
+std::vector<uint8_t> backgroundAbsorber(const std::vector<uint8_t>& identical, bool toEnd) {
+    std::vector<uint8_t> flat(identical.size(), 0);
+    // Free end = opposite the attached end: scan from it inward for the first run.
+    long n = long(identical.size()), k = toEnd ? 0 : n - 1, step = toEnd ? 1 : -1;
+    while (k >= 0 && k < n && !identical[size_t(k)]) k += step;
+    while (k >= 0 && k < n && identical[size_t(k)]) flat[size_t(k)] = 1, k += step;
     return flat;
 }
 
@@ -210,7 +246,7 @@ std::vector<FlatResult> applyFlatAbsorb(const cv::Mat& oldImage, const cv::Mat& 
         }
         if (!scale || std::fabs(std::log(*scale)) <= NATIVE_SCALE_TOLERANCE) scale = 1.;
         double middle[2] = {leaf.midpointBox[2] - leaf.midpointBox[0], leaf.midpointBox[3] - leaf.midpointBox[1]};
-        FlatResult result{int(index), leaf.name, false, pyround(*scale, 3), {}};
+        FlatResult result{int(index), leaf.name, false, pyround(*scale, 3), {}, {}};
         // separable_mesh
         double targets[2] = {middle[0] - 1, middle[1] - 1};
         if (std::min({patches[0].rows, patches[0].cols, patches[1].rows, patches[1].cols}) < 2 || std::min(targets[0], targets[1]) <= 0) {
@@ -224,24 +260,52 @@ std::vector<FlatResult> applyFlatAbsorb(const cv::Mat& oldImage, const cv::Mat& 
                 agreed.push_back({(ma[i].x + mb[i].x) / 2 * (middle[0] - 1) / average[0], (ma[i].y + mb[i].y) / 2 * (middle[1] - 1) / average[1]});
         }
         double meet = (1 + *scale) / 2, owns[2] = {meet, meet / *scale};
-        std::vector<uint8_t> flats[2][2];
+        std::vector<uint8_t> identical[2][2], flats[2][2];
         std::pair<double, bool> fits[2][2];
         for (int side = 0; side < 2; ++side)
             for (int axis = 0; axis < 2; ++axis) {
-                flats[side][axis] = flatIntervals(patches[side], axis);
+                identical[side][axis] = identicalIntervals(patches[side], axis);
+                flats[side][axis] = flatIntervals(identical[side][axis]);
                 fits[side][axis] = affordableScale(flats[side][axis], targets[axis], owns[side]);
             }
-        Meshes mesh;
-        bool useful = false;
-        for (int side = 0; side < 2; ++side) {
-            // D4-1: content that does not fit shrinks isotropically by the smallest scale an absorbing axis can afford;
-            // a forced (no flat room) axis is uniform whatever the factor and does not drive it.
+        // D4-1: content that does not fit shrinks isotropically by the smallest scale an absorbing axis can afford;
+        // a forced axis (no flat run) would be uniform whatever the factor and does not drive it.
+        auto isotropicScale = [&](int side) {
             double factor = 1.;
             for (auto& [value, absorbs] : fits[side])
                 if (absorbs) factor = std::min(factor, value / owns[side]);
-            double isotropic = owns[side] * factor;
+            return owns[side] * factor;
+        };
+        // A forced axis whose uniform scale is visibly off the content's isotropic scale squashes the content: its
+        // background run absorbs instead. Repeat until stable -- a promoted axis that must shrink lowers the factor,
+        // which can make the other axis visibly anisotropic in turn (at most one promotion per side and axis).
+        std::optional<bool> toEnd[2];
+        for (int side = 0; side < 2; ++side) {
+            bool promoted[2] = {false, false};
+            for (bool changed = true; changed;) {
+                changed = false;
+                double isotropic = isotropicScale(side);
+                for (int axis = 0; axis < 2; ++axis) {
+                    auto [value, absorbs] = fits[side][axis];
+                    if (absorbs || promoted[axis] || std::fabs(std::log(value / isotropic)) <= NATIVE_SCALE_TOLERANCE) continue;
+                    promoted[axis] = true;
+                    if (!toEnd[axis]) toEnd[axis] = attachedToEnd(patches[0], patches[1], axis);
+                    std::vector<uint8_t> background = backgroundAbsorber(identical[side][axis], *toEnd[axis]);
+                    if (std::none_of(background.begin(), background.end(), [](uint8_t f) { return f != 0; })) continue;
+                    flats[side][axis] = std::move(background);
+                    fits[side][axis] = affordableScale(flats[side][axis], targets[axis], owns[side]);
+                    result.background.push_back(std::string(side ? "new" : "old") + (axis ? "-y-" : "-x-") + (*toEnd[axis] ? "end" : "start"));
+                    changed |= fits[side][axis].second;
+                }
+            }
+        }
+        Meshes mesh;
+        bool useful = false;
+        for (int side = 0; side < 2; ++side) {
+            double isotropic = isotropicScale(side);
             bool unabsorbed = false;
-            for (auto& [value, absorbs] : fits[side]) unabsorbed |= factor < 1 && !absorbs && !numeric::isclose(value, isotropic);
+            // Residual D4-1 violation: a forced axis visibly off the isotropic scale with no background run to absorb.
+            for (auto& [value, absorbs] : fits[side]) unabsorbed |= !absorbs && std::fabs(std::log(value / isotropic)) > NATIVE_SCALE_TOLERANCE;
             std::vector<double> axes[2][2];
             for (int axis = 0; axis < 2; ++axis) {
                 std::vector<std::array<double, 2>> anchors;
