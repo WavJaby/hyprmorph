@@ -10,19 +10,22 @@ namespace {
 }
 
 void Geometry::build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSize newCanvas, ESide side, double t, double weight, SBatch& out) {
-    // Each side lives on its own half of t and is frozen at the midpoint on the other half.
-    const double tc     = side == OLD ? std::min(t, .5) : std::max(t, .5);
-    const double phase  = side == OLD ? 2 * tc : 2 * tc - 1; // box: endpoint -> midpoint (old), midpoint -> endpoint (new)
-    const double h      = side == OLD ? 2 * tc : 2 * (1 - tc); // mesh: 0 at the side's own endpoint, 1 at the midpoint
+    // Leaf boxes: one path for both sides, old -> midpoint over t 0..0.5, midpoint -> new over 0.5..1, so in a crossfade the two layers'
+    // leaves coincide. Interior: each side's own grid, 0 at its endpoint and 1 (the midpoint shape) on the other half -- a grid is only
+    // defined between its endpoint and the midpoint. Do not freeze a side's whole layout at the midpoint instead: drawn in the box of a
+    // later t it is scaled with the box, and the two layers drift apart through the fade.
+    const bool   first  = t <= .5;
+    const double phase  = first ? 2 * t : 2 * t - 1;
+    const double h      = side == OLD ? std::min(2 * t, 1.) : std::min(2 * (1 - t), 1.);
     const SSize  own    = side == OLD ? oldCanvas : newCanvas;
-    const SSize  canvas = {lerp(oldCanvas.w, newCanvas.w, tc), lerp(oldCanvas.h, newCanvas.h, tc)};
+    const SSize  canvas = {lerp(oldCanvas.w, newCanvas.w, t), lerp(oldCanvas.h, newCanvas.h, t)};
     const std::array<double, 2> ownSize{own.w, own.h}, canvasSize{canvas.w, canvas.h}, oldSize{oldCanvas.w, oldCanvas.h}, newSize{newCanvas.w, newCanvas.h};
 
     for (const auto& leaf : leaves) {
         const auto&           source = leaf.box(side);
         std::array<double, 4> box;
         for (size_t k = 0; k < 4; ++k)
-            box[k] = side == OLD ? lerp(leaf.oldBox[k], leaf.midpointBox[k], phase) : lerp(leaf.midpointBox[k], leaf.newBox[k], phase);
+            box[k] = first ? lerp(leaf.oldBox[k], leaf.midpointBox[k], phase) : lerp(leaf.midpointBox[k], leaf.newBox[k], phase);
         // An edge on the canvas edge at both endpoints stays on it: midpoint_box need not be the exact mean of the two canvases.
         for (size_t axis = 0; axis < 2; ++axis) {
             if (leaf.oldBox[axis] == 0 && leaf.newBox[axis] == 0)
