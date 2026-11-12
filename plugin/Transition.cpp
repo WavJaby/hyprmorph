@@ -2,7 +2,6 @@
 
 #include "Presenter.hpp"
 
-#include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
@@ -247,11 +246,8 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
     // transitional frame (kitty: old cells at top-left, rest blank) -- readiness judges it from the captured m_new, also during a hold.
     if (!m_newReady) {
         const auto surface = window->resource();
-        if (surface && surface->m_current.ackedSize == m_targetAck) {
+        if (surface && surface->m_current.ackedSize == m_targetAck)
             m_newReady = true;
-            Log::logger->log(Log::DEBUG, "[resize-transition] new buffer: ack {} surface {} geometry {}", m_targetAck, surface->m_current.size,
-                             window->m_xdgSurface->m_current.geometry.size());
-        }
     }
     if (m_newReady) {
         // Re-captured every frame: desynced subsurfaces commit without the main surface, so commit-driven capture would miss them.

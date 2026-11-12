@@ -17,6 +17,7 @@
 #include "Readiness.hpp"
 #include "Thumbnail.hpp"
 #include "Transition.hpp"
+#include "../prep/src/json.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
@@ -32,6 +33,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -50,6 +53,8 @@ namespace {
     SP<Config::Values::CStringValue> cfgPrepWorker;
     SP<Config::Values::CBoolValue>   cfgMesh;
     SP<Config::Values::CIntValue>    cfgMeshRampMs;
+    SP<Config::Values::CBoolValue>   cfgVerbose;
+    SP<SHyprCtlCommand>              statsCommand;
 
     struct STracked {
         PHLWINDOWREF               window;
@@ -101,6 +106,27 @@ namespace {
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
+    // Newest usable or refused answers, for `hyprctl resize-transition`: what each resize got, without a log.
+    struct SAnswerRecord {
+        uint64_t    window = 0, generation = 0;
+        uint32_t    candidate = 0;
+        double      readyMs = 0, prepMs = 0;
+        double      resizeUnix = 0; // wall-clock s of the resize (now - readyMs): matches answers to a screen recording's own clock
+        std::string outcome;        // drawn / joined / late / refused
+    };
+    constexpr size_t          ANSWER_HISTORY = 64;
+    std::deque<SAnswerRecord> answers;
+
+    // Why transitions ended (detach reasons, "transition done" included), readiness events, and the prep worker's life.
+    std::map<std::string, unsigned long> detachReasons;
+    struct SReadinessCounters {
+        unsigned long selected = 0, vetoed = 0, revoked = 0, errors = 0;
+    } readinessCounts;
+    struct SWorkerState {
+        unsigned long downs = 0, spawnFailures = 0;
+        std::string   lastError;
+    } workerState;
+
     // D3-4 group being filled: every generation that begins before the end of the next syncWindows pass joins it -- one layout
     // recalculation sets all its goals before the next render.preChecks, whether a frame or a client's precommit notices them first.
     uint64_t openGroup = 1;
@@ -110,7 +136,7 @@ namespace {
         unsigned long groupReleases = 0, groupWaits = 0;
     } groupCounts;
 
-    // Compositor-thread cost of onPreChecks on frames where a transition was attached (capture + thumbnail submit/poll), ms. Logged at unload.
+    // Compositor-thread cost of onPreChecks on frames where a transition was attached (capture + thumbnail submit/poll), ms.
     std::vector<double> preChecksMs;
 
     struct STracked;
@@ -124,9 +150,22 @@ namespace {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    // Reaches Hyprland's logger only because the Makefile builds with -fno-gnu-unique (see there).
-    void log(const std::string& msg) {
-        Log::logger->log(Log::DEBUG, "[resize-transition] {}", msg);
+    // Both reach Hyprland's logger only because the Makefile builds with -fno-gnu-unique (see there).
+    // warn: a part of the plugin stopped working (always written). trace: per-resize events, only with plugin:resize_transition:verbose.
+    // Counters are not logged at all: `hyprctl resize-transition` (statsJson) returns them on demand, whatever the log settings.
+    void warn(const std::string& msg) {
+        Log::logger->log(Log::WARN, "[resize-transition] {}", msg);
+    }
+    void trace(const std::string& msg) {
+        if (cfgVerbose && cfgVerbose->value())
+            Log::logger->log(Log::DEBUG, "[resize-transition] {}", msg);
+    }
+
+    void recordAnswer(SAnswerRecord record) {
+        record.resizeUnix = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() - record.readyMs / 1000.;
+        answers.push_back(std::move(record));
+        if (answers.size() > ANSWER_HISTORY)
+            answers.pop_front();
     }
 
     // reason by value: callers pass t.transition->m_failure, which the erase below destroys before the log line is built.
@@ -142,8 +181,10 @@ namespace {
             Hold::release(w, Hold::Clock::now());
             Readiness::endGeneration(windowId(w));
         }
-        if (!reason.empty())
-            log("native drawing: " + reason);
+        if (!reason.empty()) {
+            ++detachReasons[reason];
+            trace("native drawing: " + reason);
+        }
     }
 
     // D3-3: hold the size/position animation for up to hold_ms; a usable prep answer releases it earlier (onPrepAnswers).
@@ -152,9 +193,9 @@ namespace {
             return;
         std::string why;
         if (Hold::begin(w, Hold::Clock::now(), std::chrono::milliseconds{cfgHoldMs->value()}, why))
-            log(std::format("hold {} ms: size {} -> {}", cfgHoldMs->value(), w->sizeAnimation()->value(), w->sizeAnimation()->goal()));
+            trace(std::format("hold {} ms: size {} -> {}", cfgHoldMs->value(), w->sizeAnimation()->value(), w->sizeAnimation()->goal()));
         else
-            log("no hold: " + why);
+            trace("no hold: " + why);
     }
 
     // source: which hook noticed the goal change first ("precommit" = the client answered before any frame; capture-timing evidence).
@@ -162,7 +203,7 @@ namespace {
         const auto goal = w->size(Desktop::View::IGeometric::GEOMETRIC_GOAL);
         if (goal == t.baselineGoal)
             return;
-        log(std::format("generation {}x{} -> {}x{} via {}", t.baselineGoal.x, t.baselineGoal.y, goal.x, goal.y, source));
+        trace(std::format("generation {}x{} -> {}x{} via {}", t.baselineGoal.x, t.baselineGoal.y, goal.x, goal.y, source));
         t.baselineGoal = goal;
         if (!cfgEnabled->value() || !g_pHyprRenderer->shouldRenderWindow(w)) {
             detach(t, "");
@@ -176,7 +217,8 @@ namespace {
         } else {
             auto transition = makeUnique<CResizeTransition>(w);
             if (!transition->beginGeneration(goal)) {
-                log("native drawing: " + transition->m_failure);
+                ++detachReasons[transition->m_failure];
+                trace("native drawing: " + transition->m_failure);
                 return;
             }
             t.transition = transition.get();
@@ -284,7 +326,7 @@ namespace {
         if (Thumbnail::submit(tex->m_texID, 0.F, 0.F, newPx.x / size.x, newPx.y / size.y, Thumbnail::WIDTH, height, tag))
             t.sampledCommits = t.commits;
         else if (*Thumbnail::failure())
-            log(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
+            warn(std::string{"readiness thumbnails disabled: "} + Thumbnail::failure());
     }
 
     // The tracked window, or null once it is gone. A window can be destroyed in the middle of a pass -- rendering a snapshot of another
@@ -334,7 +376,7 @@ namespace {
         const auto newTicket = oldTicket ? submit(*content, newTex->m_texID, newSize) : 0;
         if (!newTicket) { // a lone old readback completes into no staged entry and is dropped
             if (*analysisPool.failure()) {
-                log(std::string{"prep images disabled: "} + analysisPool.failure());
+                warn(std::string{"prep images disabled: "} + analysisPool.failure());
                 t.stageWanted = false;
             } else
                 ++prepCounts.stageRetries;
@@ -376,7 +418,9 @@ namespace {
         if (joined)
             ++prepCounts.meshJoined;
         meshReadyMs.push_back(readyMs);
-        log(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
+        recordAnswer({.window = a.window, .generation = a.generation, .candidate = a.candidate, .readyMs = readyMs, .prepMs = a.prepMs,
+                      .outcome = !drawn ? "late" : joined ? "joined" : "drawn"});
+        trace(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
                         a.generation, a.candidate, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
                         !drawn ? "plain scale" : joined ? "mesh joined the moving box" : "mesh drawn"));
     }
@@ -407,7 +451,7 @@ namespace {
                     Hold::release(w, now);
             if (members > 1) {
                 ++groupCounts.groupReleases;
-                log(std::format("group {}: {} windows released together {:.1f} ms after resize", first->group, members, (nowNs() - first->resizeNs) / 1e6));
+                trace(std::format("group {}: {} windows released together {:.1f} ms after resize", first->group, members, (nowNs() - first->resizeNs) / 1e6));
             }
         }
     }
@@ -434,7 +478,8 @@ namespace {
                         wantCandidate(*t, e.candidate);
                     break;
                 case Readiness::SEvent::SELECTED:
-                    log(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs));
+                    ++readinessCounts.selected;
+                    trace(std::format("readiness 0x{:x} gen {}: ready at {:.1f} ms", e.window, e.generation, e.elapsedMs));
                     if (current) {
                         wantCandidate(*t, e.candidate); // a selection whose candidate was never announced (static layout) is asked now
                         t->selected = e.candidate;
@@ -444,17 +489,24 @@ namespace {
                         }
                     }
                     break;
-                case Readiness::SEvent::VETOED: log(std::format("readiness 0x{:x} gen {}: selection vetoed at {:.1f} ms", e.window, e.generation, e.elapsedMs)); break;
+                case Readiness::SEvent::VETOED:
+                    ++readinessCounts.vetoed;
+                    trace(std::format("readiness 0x{:x} gen {}: selection vetoed at {:.1f} ms", e.window, e.generation, e.elapsedMs));
+                    break;
                 case Readiness::SEvent::REVOKED:
-                    log(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs));
+                    ++readinessCounts.revoked;
+                    trace(std::format("readiness 0x{:x} gen {}: revoked at {:.1f} ms", e.window, e.generation, e.elapsedMs));
                     if (current) {
                         t->selected = 0;
                         if (t->transition->revokeMesh())
                             ++prepCounts.meshRevoked;
                     }
                     break;
-                case Readiness::SEvent::SUMMARY: log("readiness summary " + e.text); break;
-                case Readiness::SEvent::ERROR: log("readiness error: " + e.text); break;
+                case Readiness::SEvent::SUMMARY: trace("readiness summary " + e.text); break;
+                case Readiness::SEvent::ERROR:
+                    ++readinessCounts.errors;
+                    warn("readiness error: " + e.text);
+                    break;
             }
         }
     }
@@ -498,7 +550,9 @@ namespace {
 
     void onPrepAnswers() {
         if (const auto failure = Prep::takeFailure()) {
-            log("prep worker down, plain scale from here: " + *failure);
+            ++workerState.downs;
+            workerState.lastError = *failure;
+            warn("prep worker down, plain scale from here: " + *failure);
             for (auto& t : tracked)
                 t->settled = true;
         }
@@ -514,7 +568,9 @@ namespace {
                 continue;
             }
             if (!a.ok) {
-                log(std::format("prep 0x{:x} gen {} candidate {}: refused: {}", a.window, a.generation, a.candidate, a.refusal));
+                recordAnswer({.window = a.window, .generation = a.generation, .candidate = a.candidate, .readyMs = (nowNs() - t->resizeNs) / 1e6,
+                              .prepMs = a.prepMs, .outcome = "refused"});
+                trace(std::format("prep 0x{:x} gen {} candidate {}: refused: {}", a.window, a.generation, a.candidate, a.refusal));
                 t->settled = true;
                 continue;
             }
@@ -535,7 +591,13 @@ namespace {
         const auto  started = std::chrono::steady_clock::now();
         const bool  ok      = Prep::start(path, error);
         const auto  ms      = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-        log(ok ? std::format("prep worker started in {:.1f} ms: {}", ms, path) : "no prep worker, plain scale only: " + error);
+        if (ok)
+            trace(std::format("prep worker started in {:.1f} ms: {}", ms, path));
+        else {
+            ++workerState.spawnFailures;
+            workerState.lastError = error;
+            warn("no prep worker, plain scale only: " + error);
+        }
     }
 
     void onPreChecks(PHLMONITOR monitor) {
@@ -583,6 +645,66 @@ namespace {
         if (active)
             preChecksMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }
+
+    std::string holdDisabled; // why the animation hold is off for this load, empty when on
+
+    // Quantiles over an unsorted sample (copied): {n, min, median, p95, max}.
+    prep::json::Value summary(std::vector<double> sample) {
+        auto out = prep::json::Value::object();
+        out.set("n", sample.size());
+        if (sample.empty())
+            return out;
+        std::ranges::sort(sample);
+        const auto at = [&](double q) { return sample[std::min(sample.size() - 1, size_t(q * sample.size()))]; };
+        out.set("min", sample.front());
+        out.set("median", at(.5));
+        out.set("p95", at(.95));
+        out.set("max", sample.back());
+        return out;
+    }
+
+    // `hyprctl resize-transition`: every counter of this load as one JSON object (the same whatever the output format flag).
+    std::string statsJson() {
+        const auto object = [](std::initializer_list<std::pair<const char*, prep::json::Value>> fields) {
+            auto out = prep::json::Value::object();
+            for (const auto& [key, value] : fields)
+                out.set(key, value);
+            return out;
+        };
+        const auto readback = [&](const Readback::SCounters& c) {
+            return object({{"submitted", c.submitted}, {"busy", c.busy}, {"completed", c.completed}, {"gl_errors", c.glErrors}});
+        };
+        const auto& h  = Hold::counters();
+        const auto  pc = Prep::counters();
+        auto        reasons = prep::json::Value::object();
+        for (const auto& [reason, count] : detachReasons)
+            reasons.set(reason, count);
+        auto recent = prep::json::Value::array();
+        for (const auto& a : answers)
+            recent.push(object({{"window", std::format("0x{:x}", a.window)}, {"generation", a.generation}, {"candidate", size_t(a.candidate)},
+                                {"ready_ms", a.readyMs}, {"prep_ms", a.prepMs}, {"resize_unix", a.resizeUnix},
+                                {"outcome", a.outcome}}));
+        const auto root = object({
+            {"worker", object({{"running", Prep::running()}, {"path", Prep::workerPath()}, {"downs", workerState.downs},
+                               {"spawn_failures", workerState.spawnFailures}, {"last_error", workerState.lastError}})},
+            {"hold", object({{"disabled", holdDisabled}, {"holds", h.holds}, {"retargets", h.retargets}, {"released_early", h.releasedEarly},
+                             {"refused_spent", h.refusedSpent}, {"refused_spring", h.refusedSpring}, {"refused_idle", h.refusedIdle}, {"adopted", h.adopted},
+                             {"stale_dropped", h.staleDropped}})},
+            {"readiness", object({{"selected", readinessCounts.selected}, {"vetoed", readinessCounts.vetoed}, {"revoked", readinessCounts.revoked},
+                                  {"errors", readinessCounts.errors}})},
+            {"prep", object({{"staged", prepCounts.staged}, {"stage_retries", prepCounts.stageRetries}, {"too_small", prepCounts.tooSmall},
+                             {"requests", pc.requests}, {"dropped", pc.dropped}, {"replaced", pc.replaced}, {"ok", pc.ok}, {"refused", pc.refused},
+                             {"stale", prepCounts.stale}, {"early", prepCounts.early}, {"in_hold", prepCounts.inHold}, {"after_hold", prepCounts.afterHold}})},
+            {"mesh", object({{"drawn", prepCounts.meshDrawn}, {"joined", prepCounts.meshJoined}, {"late", prepCounts.meshLate}, {"revoked", prepCounts.meshRevoked}})},
+            {"group", object({{"group_releases", groupCounts.groupReleases}, {"group_waits", groupCounts.groupWaits}})},
+            {"readback", object({{"analysis", readback(analysisPool.counters())}, {"thumbnail", readback(Thumbnail::counters())}})},
+            {"detach", reasons},
+            {"mesh_ready_ms", summary(meshReadyMs)},
+            {"prechecks_ms", summary(preChecksMs)},
+            {"answers", recent},
+        });
+        return prep::json::dump(root);
+    }
 }
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -622,14 +744,19 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
                                                           "Ms over which a mesh whose content changed under it relaxes back to plain scale", 80,
                                                           Config::Values::SIntValueOptions{.min = 0});
+    cfgVerbose    = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:verbose",
+                                                         "Write per-resize events to the Hyprland log (0 = warnings only; counters: hyprctl resize-transition)", false);
     for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeSpan), SP<Config::Values::IValue>(cfgCrossfadeMs), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
                               SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
-                              SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs)})
+                              SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs),
+                              SP<Config::Values::IValue>(cfgVerbose)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
             throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
 
-    if (std::string error; !Hold::init(error))
-        log("animation hold disabled: " + error);
+    if (std::string error; !Hold::init(error)) {
+        holdDisabled = error;
+        warn("animation hold disabled: " + error);
+    }
     Readiness::start({});
     // At load, not at the first resize: the worker needs 0.5-2 s (context, kernels, warm-up) before its first answer is fast.
     syncPrepWorker();
@@ -637,15 +764,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
     preChecksListener = Event::bus()->m_events.render.preChecks.listen([](PHLMONITOR monitor) { onPreChecks(monitor); });
-    log("loaded");
+    statsCommand = HyprlandAPI::registerHyprCtlCommand(handle, SHyprCtlCommand{.name = "resize-transition", .exact = true,
+                                                                               .fn = [](eHyprCtlOutputFormat, std::string) { return statsJson(); }});
+    trace("loaded");
     return {"resize-transition", "Plain-scale resize transition with old snapshot and crossfade", "wavjaby", "0.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+    if (statsCommand)
+        HyprlandAPI::unregisterHyprCtlCommand(handle, statsCommand);
+    statsCommand      = nullptr;
     preChecksListener = nullptr;
-    const auto& c = Hold::counters();
-    log(std::format("hold counters: holds {} retargets {} released_early {} refused_spent {} refused_spring {} refused_idle {} adopted {} stale_dropped {}",
-                    c.holds, c.retargets, c.releasedEarly, c.refusedSpent, c.refusedSpring, c.refusedIdle, c.adopted, c.staleDropped));
     Hold::exit();
     // Transformers' vtables live in this .so: every attached one must leave its window before unload.
     if (const auto gl = g_pHyprRenderer->glBackend())
@@ -653,32 +782,12 @@ APICALL EXPORT void PLUGIN_EXIT() {
     for (auto& t : tracked)
         detach(*t, "");
     tracked.clear();
-    // The worker runs this library's code: join before unmap. Summaries of the generations closed above are logged here.
+    // The worker runs this library's code: join before unmap. Summaries of the generations closed above are traced here.
     Readiness::stop();
     onReadinessEvents();
     Prep::stop();
-    const auto pc = Prep::counters();
-    log(std::format("prep counters: staged {} stage_retries {} too_small {} requests {} dropped {} replaced {} ok {} refused {} stale {} early {} in_hold {} after_hold {}",
-                    prepCounts.staged, prepCounts.stageRetries, prepCounts.tooSmall, pc.requests, pc.dropped, pc.replaced, pc.ok, pc.refused, prepCounts.stale,
-                    prepCounts.early, prepCounts.inHold, prepCounts.afterHold));
-    log(std::format("mesh counters: drawn {} joined {} late {} revoked {}", prepCounts.meshDrawn, prepCounts.meshJoined, prepCounts.meshLate, prepCounts.meshRevoked));
-    log(std::format("group counters: group_releases {} group_waits {}", groupCounts.groupReleases, groupCounts.groupWaits));
     Presenter::destroy();
-    if (!meshReadyMs.empty()) {
-        std::ranges::sort(meshReadyMs);
-        log(std::format("mesh ready ms after resize over {} answers: min {:.1f} median {:.1f} max {:.1f}", meshReadyMs.size(), meshReadyMs.front(),
-                        meshReadyMs[meshReadyMs.size() / 2], meshReadyMs.back()));
-    }
-    const auto& ac = analysisPool.counters();
-    log(std::format("analysis readback counters: submitted {} busy {} completed {} gl_errors {}", ac.submitted, ac.busy, ac.completed, ac.glErrors));
     analysisPool.destroy();
     staged.clear();
-    if (!preChecksMs.empty()) {
-        std::ranges::sort(preChecksMs);
-        const auto at = [](double q) { return preChecksMs[std::min(preChecksMs.size() - 1, size_t(q * preChecksMs.size()))]; };
-        log(std::format("preChecks ms over {} transition frames: median {:.3f} p95 {:.3f} max {:.3f}", preChecksMs.size(), at(.5), at(.95), preChecksMs.back()));
-    }
-    const auto& tc = Thumbnail::counters();
-    log(std::format("thumbnail counters: submitted {} busy {} completed {} gl_errors {}", tc.submitted, tc.busy, tc.completed, tc.glErrors));
     Thumbnail::destroy();
 }
