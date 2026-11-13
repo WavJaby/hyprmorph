@@ -1,6 +1,6 @@
 // prep-worker: long-lived mesh preparation service (D1-1: out of the compositor process).
 //
-//   prep-worker [--socket PATH | --fd N] [--node /dev/dri/renderD128]
+//   prep-worker [--socket PATH | --fd N] --node RENDER_NODE   (the plugin passes the compositor's render node, e.g. /dev/dri/renderD128)
 //
 // Owns one headless EGL/GLES context on the render node and the compiled NCC/CG kernels for its whole life, so a request pays no context,
 // shader or JIT cost after the first one. Serves the contract in src/wire.hpp, requests in order.
@@ -89,7 +89,7 @@ void serve(int client, Preparer& preparer) {
 
 int main(int argc, char** argv) {
     try {
-        std::string node = "/dev/dri/renderD128";
+        std::string node;
         int inherited = -1;
         for (int i = 1; i < argc; ++i) {
             std::string a = argv[i];
@@ -97,11 +97,12 @@ int main(int argc, char** argv) {
             else if (a == "--fd" && i + 1 < argc) inherited = std::atoi(argv[++i]);
             else if (a == "--node" && i + 1 < argc) node = argv[++i];
             else {
-                std::fprintf(stderr, "usage: prep-worker [--socket PATH | --fd N] [--node RENDER_NODE]\n");
+                std::fprintf(stderr, "usage: prep-worker [--socket PATH | --fd N] --node RENDER_NODE\n");
                 return 2;
             }
         }
         if (inherited >= 0 && !socketFile.empty()) throw std::invalid_argument("--socket and --fd exclude each other");
+        if (node.empty()) throw std::invalid_argument("--node RENDER_NODE is required");
         cv::setNumThreads(1);
         auto started = std::chrono::steady_clock::now();
         gles::Context context(node);

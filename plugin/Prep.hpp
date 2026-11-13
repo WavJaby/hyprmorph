@@ -36,14 +36,16 @@ namespace Prep {
         double      roundTripMs = 0; // request() -> answer parsed, incl. the wait behind earlier requests
     };
 
-    // Spawns `workerPath --fd N` and starts the client thread; stops a previous worker first. false -> reason in `error`, no worker.
-    bool start(const std::string& workerPath, std::string& error);
+    // Spawns `workerPath --fd N --node renderNode` and starts the client thread; stops a previous worker first. false -> reason in `error`, no worker.
+    bool start(const std::string& workerPath, const std::string& renderNode, std::string& error);
     // Closes the connection, joins the thread (it executes this library's code: must run before unload) and reaps the worker.
     void stop();
     // A worker is connected: a request made now will be answered (or reported by takeFailure()).
     bool running();
     // Path of the running or last started worker; empty before the first start().
     const std::string& workerPath();
+    // Render node handed to that worker.
+    const std::string& renderNode();
 
     // Queues a request. An unsent request of the same window is replaced; dropped when no worker is running.
     void request(SRequest&& request);

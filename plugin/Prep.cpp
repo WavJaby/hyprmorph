@@ -33,6 +33,7 @@ namespace {
     };
 
     std::string                path;
+    std::string                node;
     pid_t                      worker = -1;
     int                        connection = -1;
     std::thread                client;
@@ -137,9 +138,10 @@ namespace {
     }
 }
 
-bool Prep::start(const std::string& workerPath, std::string& error) {
+bool Prep::start(const std::string& workerPath, const std::string& renderNode, std::string& error) {
     stop();
     path = workerPath;
+    node = renderNode;
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) != 0) {
         error = std::string{"socketpair: "} + std::strerror(errno);
@@ -160,7 +162,8 @@ bool Prep::start(const std::string& workerPath, std::string& error) {
     posix_spawnattr_setsigdefault(&attributes, &all);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
     const std::string fd      = std::to_string(WORKER_FD);
-    char* const       argv[]  = {const_cast<char*>(workerPath.c_str()), const_cast<char*>("--fd"), const_cast<char*>(fd.c_str()), nullptr};
+    char* const       argv[]  = {const_cast<char*>(workerPath.c_str()), const_cast<char*>("--fd"), const_cast<char*>(fd.c_str()),
+                                 const_cast<char*>("--node"), const_cast<char*>(renderNode.c_str()), nullptr};
     const int         spawned = posix_spawn(&worker, workerPath.c_str(), &actions, &attributes, argv, environ);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
@@ -211,6 +214,10 @@ bool Prep::running() {
 
 const std::string& Prep::workerPath() {
     return path;
+}
+
+const std::string& Prep::renderNode() {
+    return node;
 }
 
 void Prep::request(SRequest&& request) {

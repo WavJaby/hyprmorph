@@ -32,8 +32,10 @@
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/Compositor.hpp>
 
 #include <dlfcn.h>
+#include <xf86drm.h>
 
 #include <algorithm>
 #include <cmath>
@@ -600,6 +602,21 @@ namespace {
         return (std::filesystem::path{self.dli_fname}.parent_path() / "prep-worker").string();
     }
 
+    // Render node of the GPU the compositor renders on: the worker's analysis must run there, not on whichever GPU enumerates first.
+    // Hyprland's render-node fd when it opened one, else the render node of its primary DRM device. Empty -> no node found.
+    std::string compositorRenderNode() {
+        for (const int fd : {g_pCompositor->m_drmRenderNode.fd, g_pCompositor->m_drm.fd}) {
+            if (fd < 0)
+                continue;
+            if (char* name = drmGetRenderDeviceNameFromFd(fd)) {
+                std::string node{name};
+                free(name);
+                return node;
+            }
+        }
+        return {};
+    }
+
     // Worker path: the config value, or the worker beside this plugin when empty. A changed value restarts the worker.
     void syncPrepWorker() {
         auto path = cfgPrepWorker->value();
@@ -608,11 +625,12 @@ namespace {
         if (path == Prep::workerPath())
             return;
         std::string error;
+        const auto  node    = compositorRenderNode();
         const auto  started = std::chrono::steady_clock::now();
-        const bool  ok      = Prep::start(path, error);
+        const bool  ok      = node.empty() ? (error = "compositor has no DRM render node", false) : Prep::start(path, node, error);
         const auto  ms      = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         if (ok)
-            trace(std::format("prep worker started in {:.1f} ms: {}", ms, path));
+            trace(std::format("prep worker started in {:.1f} ms: {} on {}", ms, path, node));
         else {
             ++workerState.spawnFailures;
             workerState.lastError = error;
@@ -705,7 +723,7 @@ namespace {
                                 {"ready_ms", a.readyMs}, {"prep_ms", a.prepMs}, {"resize_unix", a.resizeUnix},
                                 {"outcome", a.outcome}}));
         const auto root = object({
-            {"worker", object({{"running", Prep::running()}, {"path", Prep::workerPath()}, {"downs", workerState.downs},
+            {"worker", object({{"running", Prep::running()}, {"path", Prep::workerPath()}, {"node", Prep::renderNode()}, {"downs", workerState.downs},
                                {"spawn_failures", workerState.spawnFailures}, {"last_error", workerState.lastError}})},
             {"hold", object({{"disabled", holdDisabled}, {"holds", h.holds}, {"retargets", h.retargets}, {"released_early", h.releasedEarly},
                              {"refused_spent", h.refusedSpent}, {"refused_spring", h.refusedSpring}, {"refused_idle", h.refusedIdle}, {"adopted", h.adopted},
