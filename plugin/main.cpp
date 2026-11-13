@@ -34,13 +34,11 @@
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/Compositor.hpp>
 
-#include <dlfcn.h>
 #include <xf86drm.h>
 
 #include <algorithm>
 #include <cmath>
 #include <deque>
-#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -593,15 +591,6 @@ namespace {
         }
     }
 
-    // The prep-worker shipped beside this plugin: <directory of the loaded .so>/prep-worker. Resolved at run time, not baked in at build
-    // time, so the plugin finds its worker wherever it was built or installed (hyprpm builds in its own cache).
-    std::string bundledWorker() {
-        Dl_info self{};
-        if (!dladdr(reinterpret_cast<void*>(&bundledWorker), &self) || !self.dli_fname)
-            return "prep-worker";
-        return (std::filesystem::path{self.dli_fname}.parent_path() / "prep-worker").string();
-    }
-
     // Render node of the GPU the compositor renders on: the worker's analysis must run there, not on whichever GPU enumerates first.
     // Hyprland's render-node fd when it opened one, else the render node of its primary DRM device. Empty -> no node found.
     std::string compositorRenderNode() {
@@ -617,11 +606,11 @@ namespace {
         return {};
     }
 
-    // Worker path: the config value, or the worker beside this plugin when empty. A changed value restarts the worker.
+    // Worker path: the config value, or the worker linked into this plugin when empty. A changed value restarts the worker.
     void syncPrepWorker() {
         auto path = cfgPrepWorker->value();
         if (path.empty() || path == "[[EMPTY]]")
-            path = bundledWorker();
+            path = Prep::EMBEDDED;
         if (path == Prep::workerPath())
             return;
         std::string error;
@@ -781,7 +770,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
                                                                 "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
     cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
-                                                                "Path of the prep-worker executable the plugin runs (empty = prep-worker in the directory of the plugin's .so)", "");
+                                                                "Path of a prep-worker executable to run instead of the one built into the plugin (empty = built-in)", "");
     cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
     // 80 ms: D3-5 starting value (M3) for the mesh weight ramp.
     cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",

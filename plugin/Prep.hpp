@@ -36,6 +36,9 @@ namespace Prep {
         double      roundTripMs = 0; // request() -> answer parsed, incl. the wait behind earlier requests
     };
 
+    // workerPath value that runs the worker image linked into this plugin (EmbeddedWorker) instead of a file.
+    inline const std::string EMBEDDED = "embedded";
+
     // Spawns `workerPath --fd N --node renderNode` and starts the client thread; stops a previous worker first. false -> reason in `error`, no worker.
     bool start(const std::string& workerPath, const std::string& renderNode, std::string& error);
     // Closes the connection, joins the thread (it executes this library's code: must run before unload) and reaps the worker.

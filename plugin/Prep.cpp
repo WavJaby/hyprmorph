@@ -1,4 +1,5 @@
 #include "Prep.hpp"
+#include "EmbeddedWorker.hpp"
 
 #include "../prep/src/json.hpp"
 #include "../prep/src/wire.hpp"
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <format>
 #include <spawn.h>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -26,6 +28,28 @@ namespace {
 
     // Descriptor number the worker's end of the socketpair gets in the child.
     constexpr int WORKER_FD = 3;
+
+    // Spawns `executable` with the worker's argv; posix_spawn returns once the child has exec'd (or failed to).
+    int spawnWorker(const std::string& executable, char* const argv[], pid_t& child, int workerEnd) {
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        // dup2 clears CLOEXEC on the worker's end; closefrom keeps every other compositor descriptor (DRM, clients) out of the worker.
+        posix_spawn_file_actions_adddup2(&actions, workerEnd, WORKER_FD);
+        posix_spawn_file_actions_addclosefrom_np(&actions, WORKER_FD + 1);
+        // The compositor blocks and ignores signals for its own event loop; inherited, they would leave the worker deaf to SIGTERM.
+        posix_spawnattr_t attributes;
+        posix_spawnattr_init(&attributes);
+        sigset_t none, all;
+        sigemptyset(&none);
+        sigfillset(&all);
+        posix_spawnattr_setsigmask(&attributes, &none);
+        posix_spawnattr_setsigdefault(&attributes, &all);
+        posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+        const int spawned = posix_spawn(&child, executable.c_str(), &actions, &attributes, argv, environ);
+        posix_spawnattr_destroy(&attributes);
+        posix_spawn_file_actions_destroy(&actions);
+        return spawned;
+    }
 
     struct SQueued {
         Prep::SRequest    request;
@@ -147,26 +171,27 @@ bool Prep::start(const std::string& workerPath, const std::string& renderNode, s
         error = std::string{"socketpair: "} + std::strerror(errno);
         return false;
     }
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    // dup2 clears CLOEXEC on the worker's end; closefrom keeps every other compositor descriptor (DRM, clients) out of the worker.
-    posix_spawn_file_actions_adddup2(&actions, pair[1], WORKER_FD);
-    posix_spawn_file_actions_addclosefrom_np(&actions, WORKER_FD + 1);
-    // The compositor blocks and ignores signals for its own event loop; inherited, they would leave the worker deaf to SIGTERM.
-    posix_spawnattr_t attributes;
-    posix_spawnattr_init(&attributes);
-    sigset_t none, all;
-    sigemptyset(&none);
-    sigfillset(&all);
-    posix_spawnattr_setsigmask(&attributes, &none);
-    posix_spawnattr_setsigdefault(&attributes, &all);
-    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-    const std::string fd      = std::to_string(WORKER_FD);
-    char* const       argv[]  = {const_cast<char*>(workerPath.c_str()), const_cast<char*>("--fd"), const_cast<char*>(fd.c_str()),
-                                 const_cast<char*>("--node"), const_cast<char*>(renderNode.c_str()), nullptr};
-    const int         spawned = posix_spawn(&worker, workerPath.c_str(), &actions, &attributes, argv, environ);
-    posix_spawnattr_destroy(&attributes);
-    posix_spawn_file_actions_destroy(&actions);
+    const bool        embedded = workerPath == EMBEDDED;
+    const std::string fd       = std::to_string(WORKER_FD);
+    char* const       argv[]   = {const_cast<char*>(embedded ? "prep-worker" : workerPath.c_str()), const_cast<char*>("--fd"), const_cast<char*>(fd.c_str()),
+                                  const_cast<char*>("--node"), const_cast<char*>(renderNode.c_str()), nullptr};
+    int               spawned  = 0;
+    if (embedded) {
+        // The worker image linked into this .so, run from a sealed memfd: an install (hyprpm keeps only the .so) needs no second file.
+        // Exec'd by the parent's /proc path -- the child's closefrom has already closed its own copy of the memfd by then.
+        int image = -1;
+        try {
+            image = prep::ipc::sealedMemfd("prep-worker", EmbeddedWorker::begin(), EmbeddedWorker::size());
+        } catch (const std::exception& e) {
+            close(pair[0]);
+            close(pair[1]);
+            error = e.what();
+            return false;
+        }
+        spawned = spawnWorker(std::format("/proc/{}/fd/{}", getpid(), image), argv, worker, pair[1]);
+        close(image);
+    } else
+        spawned = spawnWorker(workerPath, argv, worker, pair[1]);
     close(pair[1]);
     if (spawned != 0) {
         close(pair[0]);

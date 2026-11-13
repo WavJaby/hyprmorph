@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/prctl.h>
 #include <filesystem>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -88,6 +89,8 @@ void serve(int client, Preparer& preparer) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Started from a memfd the kernel names the process after the fd number; keep "prep-worker" for ps/pgrep.
+    prctl(PR_SET_NAME, "prep-worker");
     try {
         std::string node;
         int inherited = -1;
