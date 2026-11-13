@@ -4,7 +4,7 @@
 //
 // Owns one headless EGL/GLES context on the render node and the compiled NCC/CG kernels for its whole life, so a request pays no context,
 // shader or JIT cost after the first one. Serves the contract in src/wire.hpp, requests in order.
-// --socket (default $XDG_RUNTIME_DIR/resize-transition/prep.sock, directory 0700): listens, one client connection at a time, runs until
+// --socket (default $XDG_RUNTIME_DIR/hyprmorph/prep.sock, directory 0700): listens, one client connection at a time, runs until
 // killed -- for the tools. --fd N: serves the already-connected SOCK_SEQPACKET socket inherited as descriptor N and exits when the peer
 // closes it -- how the compositor plugin runs it, so the worker's life is the connection's (no path, no orphan after a compositor crash).
 // Default: mutating (creates the socket; runs until killed).

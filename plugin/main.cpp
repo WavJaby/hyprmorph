@@ -112,7 +112,7 @@ namespace {
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
-    // Newest usable or refused answers, for `hyprctl resize-transition`: what each resize got, without a log.
+    // Newest usable or refused answers, for `hyprctl hyprmorph`: what each resize got, without a log.
     struct SAnswerRecord {
         uint64_t    window = 0, generation = 0;
         uint32_t    candidate = 0;
@@ -157,14 +157,14 @@ namespace {
     }
 
     // Both reach Hyprland's logger only because the Makefile builds with -fno-gnu-unique (see there).
-    // warn: a part of the plugin stopped working (always written). trace: per-resize events, only with plugin:resize_transition:verbose.
-    // Counters are not logged at all: `hyprctl resize-transition` (statsJson) returns them on demand, whatever the log settings.
+    // warn: a part of the plugin stopped working (always written). trace: per-resize events, only with plugin:hyprmorph:verbose.
+    // Counters are not logged at all: `hyprctl hyprmorph` (statsJson) returns them on demand, whatever the log settings.
     void warn(const std::string& msg) {
-        Log::logger->log(Log::WARN, "[resize-transition] {}", msg);
+        Log::logger->log(Log::WARN, "[hyprmorph] {}", msg);
     }
     void trace(const std::string& msg) {
         if (cfgVerbose && cfgVerbose->value())
-            Log::logger->log(Log::DEBUG, "[resize-transition] {}", msg);
+            Log::logger->log(Log::DEBUG, "[hyprmorph] {}", msg);
     }
 
     void recordAnswer(SAnswerRecord record) {
@@ -690,7 +690,7 @@ namespace {
         return out;
     }
 
-    // `hyprctl resize-transition`: every counter of this load as one JSON object (the same whatever the output format flag).
+    // `hyprctl hyprmorph`: every counter of this load as one JSON object (the same whatever the output format flag).
     std::string statsJson() {
         const auto object = [](std::initializer_list<std::pair<const char*, prep::json::Value>> fields) {
             auto out = prep::json::Value::object();
@@ -741,50 +741,50 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     handle = h;
     if (std::string{__hyprland_api_get_hash()} != __hyprland_api_get_client_hash())
-        throw std::runtime_error("resize-transition: compositor ABI mismatch, rebuild against the running Hyprland");
+        throw std::runtime_error("hyprmorph: compositor ABI mismatch, rebuild against the running Hyprland");
 
-    cfgEnabled = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:enabled", "Draw window size changes through the plugin (0 = native drawing)", true);
+    cfgEnabled = makeShared<Config::Values::CBoolValue>("plugin:hyprmorph:enabled", "Draw window size changes through the plugin (0 = native drawing)", true);
     // 0.3: t 0.5..0.8. Without a mesh that is box progress, ~62..128 ms after release on a 479 ms easeOutQuint animation,
     // box speed 73 % -> 32 % of its peak. Starting at the switch, not before it, lets a late mesh join until box progress 0.5. Tunable.
-    cfgCrossfadeSpan = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_span",
+    cfgCrossfadeSpan = makeShared<Config::Values::CFloatValue>("plugin:hyprmorph:crossfade_span",
                                                                "Old-to-new crossfade length in transition progress (0..1), starting at the old/new switch at 0.5", .3F,
                                                                Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
     // 1.5 px: untuned starting value; in a synthetic study 12 px made text indistinct.
-    cfgCrossfadeBlurPx = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_blur_px",
+    cfgCrossfadeBlurPx = makeShared<Config::Values::CFloatValue>("plugin:hyprmorph:crossfade_blur_px",
                                                                  "Peak blur (Gaussian sigma, logical px) of the content in the middle of the old/new crossfade (0 = off)",
                                                                  1.5F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 4.F});
     // 100 ms: untuned starting value; only for new content that arrives after the crossfade window opened.
-    cfgCrossfadeMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:crossfade_ms",
+    cfgCrossfadeMs = makeShared<Config::Values::CIntValue>("plugin:hyprmorph:crossfade_ms",
                                                            "Old-to-new crossfade length in ms when the new-size buffer arrives after the crossfade window opened", 100,
                                                            Config::Values::SIntValueOptions{.min = 0});
     // 300 ms: covers Discord's main reflow (max 190 ms) and later update (max 255 ms) after geometry settled, as measured.
-    cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:new_buffer_timeout_ms",
+    cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:hyprmorph:new_buffer_timeout_ms",
                                                                   "After the size animation ends, ms to keep the scaled old snapshot while waiting for the new-size buffer",
                                                                   300, Config::Values::SIntValueOptions{.min = 0});
     // 300 ms: hold cap. Electron chat clients have their mesh at ~245-315 ms; a 200 ms cap + the ~62 ms join window
     // misses most of them; a client whose mesh is ready earlier releases the hold then, so only slow clients pay the extra wait. 0 = no hold.
-    cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:hold_ms",
+    cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:hyprmorph:hold_ms",
                                                       "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 300,
                                                       Config::Values::SIntValueOptions{.min = 0});
-    cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:readiness", "Sample new content and run the readiness detector (0 = off)", true);
-    cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
+    cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:hyprmorph:readiness", "Sample new content and run the readiness detector (0 = off)", true);
+    cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:hyprmorph:readiness_dump",
                                                                 "Directory for per-resize readiness thumbnails and a replay manifest (empty = off; debugging only)", "");
-    cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
+    cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:hyprmorph:prep_worker",
                                                                 "Path of a prep-worker executable to run instead of the one built into the plugin (empty = built-in)", "");
-    cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
+    cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:hyprmorph:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
     // 80 ms: untuned starting value for the mesh weight ramp.
-    cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
+    cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:hyprmorph:mesh_ramp_ms",
                                                           "Ms over which a mesh whose content changed under it relaxes back to plain scale", 80,
                                                           Config::Values::SIntValueOptions{.min = 0});
-    cfgVerbose    = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:verbose",
-                                                         "Write per-resize events to the Hyprland log (0 = warnings only; counters: hyprctl resize-transition)", false);
+    cfgVerbose    = makeShared<Config::Values::CBoolValue>("plugin:hyprmorph:verbose",
+                                                         "Write per-resize events to the Hyprland log (0 = warnings only; counters: hyprctl hyprmorph)", false);
     for (const auto& value : {SP<Config::Values::IValue>(cfgEnabled), SP<Config::Values::IValue>(cfgCrossfadeSpan), SP<Config::Values::IValue>(cfgCrossfadeMs),
                               SP<Config::Values::IValue>(cfgCrossfadeBlurPx), SP<Config::Values::IValue>(cfgNewBufferTimeoutMs),
                               SP<Config::Values::IValue>(cfgHoldMs), SP<Config::Values::IValue>(cfgReadiness), SP<Config::Values::IValue>(cfgReadinessDump),
                               SP<Config::Values::IValue>(cfgPrepWorker), SP<Config::Values::IValue>(cfgMesh), SP<Config::Values::IValue>(cfgMeshRampMs),
                               SP<Config::Values::IValue>(cfgVerbose)})
         if (!HyprlandAPI::addConfigValueV2(handle, value))
-            throw std::runtime_error(std::string{"resize-transition: cannot register "} + value->name());
+            throw std::runtime_error(std::string{"hyprmorph: cannot register "} + value->name());
 
     if (std::string error; !Hold::init(error)) {
         holdDisabled = error;
@@ -797,11 +797,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     // An idle compositor renders no frame until the resize itself, so waiting for preChecks would take the new goal as baseline.
     syncWindows();
     preChecksListener = Event::bus()->m_events.render.preChecks.listen([](PHLMONITOR monitor) { onPreChecks(monitor); });
-    statsCommand = HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{.name    = "resize-transition",
+    statsCommand = HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{.name    = "hyprmorph",
                                                                                       .match   = IPC::Socket1::COMMAND_MATCH_EXACT,
                                                                                       .handler = [](const IPC::Socket1::SRequest&) { return IPC::Socket1::SResponse{statsJson()}; }});
     trace("loaded");
-    return {"resize-transition", "Plain-scale resize transition with old snapshot and crossfade", "wavjaby", "0.1"};
+    return {"hyprmorph", "Window resize transitions that keep content in place while the box animates", "WavJaby", "1.0.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

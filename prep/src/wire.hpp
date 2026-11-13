@@ -3,7 +3,7 @@
 // compositor plugin compiles this file and wire.cpp without OpenCV; ipc.hpp adds the cv::Mat conveniences for the worker and the tools.
 //
 // Transport: one AF_UNIX SOCK_SEQPACKET connection per client -- a socketpair end inherited from the compositor (prep-worker --fd), or a
-// listening socket at $XDG_RUNTIME_DIR/resize-transition/prep.sock for the tools (socketPath()). Pixels never travel in the socket: each
+// listening socket at $XDG_RUNTIME_DIR/hyprmorph/prep.sock for the tools (socketPath()). Pixels never travel in the socket: each
 // image is a sealed memfd passed with SCM_RIGHTS. No file under /tmp is involved.
 //
 // Request  = one packet: RequestHeader + 2 fds (old image, new image).

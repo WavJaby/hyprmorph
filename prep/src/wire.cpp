@@ -14,7 +14,7 @@ namespace prep::ipc {
 std::string socketPath() {
     const char* runtime = std::getenv("XDG_RUNTIME_DIR");
     if (!runtime || !*runtime) throw std::runtime_error("XDG_RUNTIME_DIR is not set; pass a socket path");
-    return std::string(runtime) + "/resize-transition/prep.sock";
+    return std::string(runtime) + "/hyprmorph/prep.sock";
 }
 
 int sealedMemfd(const char* name, const void* data, size_t bytes) {

@@ -79,7 +79,7 @@ bool CResizeTransition::capture(SSnapshot& out) {
 
     // Monitor-sized so beginFullFakeRender's projection applies unchanged; content sits at the top-left corner.
     if (!out.fb)
-        out.fb = g_pHyprRenderer->createFB("resize-transition snapshot");
+        out.fb = g_pHyprRenderer->createFB("hyprmorph snapshot");
     if (out.fb->m_size != monitor->m_pixelSize && !out.fb->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
         m_failure = "framebuffer alloc failed";
         return false;
@@ -182,7 +182,7 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
         return false;
     }
     if (!m_composed.fb)
-        m_composed.fb = g_pHyprRenderer->createFB("resize-transition composed");
+        m_composed.fb = g_pHyprRenderer->createFB("hyprmorph composed");
     if (m_composed.fb->m_size != monitor->m_pixelSize && !m_composed.fb->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
         m_failure = "framebuffer alloc failed";
         return false;
@@ -239,7 +239,7 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     // Soften the summed layers while both are on screen (linear, so the same as blurring each). Plain Gaussian over the whole box:
     // flat regions are unchanged by it, region edges soften by the same sigma -- ideally they stay sharp; a detail-only blur is not built.
     if (!m_blurPass)
-        m_blurPass = g_pHyprRenderer->createFB("resize-transition blur");
+        m_blurPass = g_pHyprRenderer->createFB("hyprmorph blur");
     if (m_blurPass->m_size != monitor->m_pixelSize && !m_blurPass->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
         m_failure = "framebuffer alloc failed";
         return false;
