@@ -1,5 +1,5 @@
-// In-process readiness (S5): one readiness::Detector per window per resize generation (D1-7), run on a worker thread so the ~2.4 ms per
-// observation (S3 live median) stays off the compositor thread. Scheduling = readiness/live.cpp, which the S3 live gate validated: every
+// In-process readiness: one readiness::Detector per window per resize generation, run on a worker thread so the ~2.4 ms per
+// observation (live median) stays off the compositor thread. Scheduling, validated on live resizes: every
 // fresh thumbnail is observed, the latest one is re-observed every reobserveMs while no newer commit is pending, and a selection whose sample
 // is older than the policy's sample-gap limit is vetoed when a newer commit is already pending.
 // The compositor thread only queues inputs and drains events; the worker never touches Hyprland or the logger.
@@ -21,7 +21,7 @@ namespace Readiness {
     // Joins the worker; must run before the plugin unmaps (the thread executes this library's code).
     void stop();
 
-    // dumpDir non-empty: this generation's thumbnails + a readiness_replay manifest go there, for offline parity (readiness_replay).
+    // dumpDir non-empty: this generation's thumbnails + a replay manifest go there, so the detector's decisions can be replayed offline.
     void beginGeneration(uint64_t window, uint64_t generation, uint64_t resizeNs, std::string dumpDir);
     void endGeneration(uint64_t window);
     void noteCommit(uint64_t window, uint64_t commit);

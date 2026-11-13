@@ -1,6 +1,6 @@
 #pragma once
-// Separable content-preserving leaf meshes, D4-1 isotropic shrink (port of experiments/flat_absorb.py), plus D4-1 on axes
-// with no flat run: a short identical-line run at the free end absorbs instead of a single-axis stretch (not in the reference).
+// Separable content-preserving leaf meshes; content that does not fit shrinks isotropically, also on axes
+// with no flat run: a short identical-line run at the free end absorbs instead of a single-axis stretch.
 #include "points.hpp"
 #include "types.hpp"
 

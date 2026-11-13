@@ -1,6 +1,5 @@
 #pragma once
-// Paired rectilinear partitions (ports of partition_transition.seams / best_split / paired_partition,
-// joint_partition.py, joint_alignment_probe.select_partition evidence, midpoint_layout.py).
+// Paired rectilinear partitions: seams, best splits, baseline and joint partitions, selection evidence, midpoint layout.
 #include "points.hpp"
 #include "pairing.hpp"
 #include "types.hpp"
@@ -26,10 +25,10 @@ struct Seam {
     json::Value toJson() const;
 };
 
-// Seam statistics of one image. Every per-row flag of partition_transition.seams (step / rule / faint line at a pixel)
+// Seam statistics of one image. Every per-row seam flag (step / rule / faint line at a pixel)
 // depends only on the 8 pixels around it along the axis, never on the queried box, so the flags are computed once per
 // image and axis and a box's support is a prefix-sum difference; only lines that pass a support threshold need the
-// percentile/median statistics. Exact integer arithmetic, same candidates as the NumPy reference.
+// percentile/median statistics. Exact integer arithmetic, same candidates as a per-box float computation.
 class SeamIndex {
 public:
     explicit SeamIndex(const cv::Mat& image);
@@ -73,14 +72,14 @@ struct ContourDetail {
     std::string name;
     double error = 0, weight = 0;
 };
-// contour_midpoint_error on the default midpoint layout; nullopt when no pair has weight.
+// Contour midpoint error on the default midpoint layout; nullopt when no pair has weight.
 std::optional<double> contourMidpointError(const std::vector<Leaf>& leaves, const std::vector<Pair>& pairs, std::vector<ContourDetail>& details);
 std::optional<double> midpointError(const std::vector<Leaf>& leaves, const Points& source, const Points& target);
 std::pair<std::string, std::string> choosePreview(std::optional<double> baseContour, std::optional<double> guidedContour,
                                                   std::optional<double> baseLandmark, std::optional<double> guidedLandmark,
                                                   const std::vector<ContourDetail>& baseDetails, const std::vector<ContourDetail>& guidedDetails);
 
-// midpoint_layout.vanishing_collapses + relayout; returns the leaves whose midpoint box changed.
+// Collapses of vanishing leaves + relayout; returns the leaves whose midpoint box changed.
 std::map<std::string, int> vanishingCollapses(const std::vector<Leaf>& leaves, const std::vector<Split>& splits, const Points& source,
                                               const Points& target);
 std::vector<std::string> relayout(std::vector<Leaf>& leaves, const std::vector<Split>& splits, const std::map<std::string, int>& collapse);

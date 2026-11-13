@@ -1,4 +1,4 @@
-// prep-worker: long-lived mesh preparation service (D1-1: out of the compositor process).
+// prep-worker: long-lived mesh preparation service, out of the compositor process.
 //
 //   prep-worker [--socket PATH | --fd N] --node RENDER_NODE   (the plugin passes the compositor's render node, e.g. /dev/dri/renderD128)
 //
@@ -78,7 +78,7 @@ void serve(int client, Preparer& preparer) {
             respond(client, request, ipc::Status::Ok, result.prepMs(), payload);
         } catch (const std::exception& e) {
             for (int k = 0; k < received; ++k) close(fds[k]);
-            // A refusal is an answer: the client falls back to the degenerate (plain-scale) mesh, D1-4.
+            // A refusal is an answer: the client falls back to the degenerate (plain-scale) mesh.
             payload.set("status", "refused");
             payload.set("reason", e.what());
             respond(client, request, ipc::Status::Refused, 0, payload);

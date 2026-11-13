@@ -1,12 +1,12 @@
 #pragma once
-// Rigid-patch NCC on GLES compute (port of the torch XPU scoring in gpu_rigid_patch_probe.matches).
+// Rigid-patch NCC on GLES compute.
 //
-// Scores every old-strip patch (widths 6/8/12/16, step 3) against every allowed new-strip position. Instead of the
-// reference's unfold + matmul (P x positions x patch-length MACs), one integer column-correlation table per allowed row
+// Scores every old-strip patch (widths 6/8/12/16, step 3) against every allowed new-strip position. Instead of an
+// unfold + matmul (P x positions x patch-length MACs), one integer column-correlation table per allowed row
 // C[r][xa][xb] = sum over patch rows and channels of a*b is built once (a matmul per row, shared by all widths) and a
 // patch/position dot is a sum of `width` diagonal entries. Pixels are 8-bit, so every sum is an exact integer; the NCC
 // numerator/denominators are formed in emulated 64-bit integers and only the final ratio is float -- at least as exact
-// as the reference's float32 normalize + matmul.
+// as a float32 normalize + matmul, which the match thresholds were tuned on.
 #include "gles.hpp"
 
 #include <opencv2/core.hpp>

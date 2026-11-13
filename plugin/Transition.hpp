@@ -1,5 +1,5 @@
 // Per-window resize transition: old snapshot + live new content, composed by one Presenter path -- a prepared mesh when one was offered in
-// time, the plain-scale degenerate mesh otherwise (D1-4) -- into a box-sized image that is then drawn like a surface (rounding, alpha).
+// time, the plain-scale degenerate mesh otherwise -- into a box-sized image that is then drawn like a surface (rounding, alpha).
 // Owned by the window's transformer list (CWindow::effects().transformers()) while a generation is active; detached (-> native drawing) when it ends or on any error.
 #pragma once
 
@@ -16,11 +16,11 @@
 #include <vector>
 
 struct STransitionConfig {
-    double crossfadeSpan;      // D3-1 old -> new fade, in transition progress, from the t = 0.5 switch
+    double crossfadeSpan;      // old -> new fade, in transition progress, from the t = 0.5 switch
     long   crossfadeMs;        // fade length when the new-size buffer arrives after that window opened
     long   newBufferTimeoutMs; // after the size animation ends, wait this long for the new-size buffer, then native
-    long   meshRampMs;         // D3-5 mesh weight ramp on a revoke
-    double crossfadeBlurPx;    // D3-1 peak Gaussian sigma, logical px, at the middle of the crossfade (0 = off)
+    long   meshRampMs;         // mesh weight ramp on a revoke
+    double crossfadeBlurPx;    // peak Gaussian sigma, logical px, at the middle of the crossfade (0 = off)
 };
 
 // A prepared mesh: leaves in analysis px of the two images the prep worker was given.
@@ -38,14 +38,14 @@ class CResizeTransition : public Render::IWindowTransformer {
     bool                     beginGeneration(const Vector2D& goalSize);
 
     // Called before each frame of the window's monitor. false -> transition is over (done or failed); caller detaches.
-    // held: the animation is held (D3-3) -> the box still has its begin size, so the old snapshot stays; the switch waits for release.
+    // held: the animation is held -> the box still has its begin size, so the old snapshot stays; the switch waits for release.
     bool                     prepareFrame(const STransitionConfig& config, bool held);
 
     // Offers this generation's mesh. Taken while only old content is on screen and the box is short of the crossfade window: transition
     // progress then restarts at 0 from the box's current progress (the mesh's t = 0 is the plain scale already shown, so it joins without a
     // jump). false -> too late, the generation stays plain scale. joined: taken after the box started moving.
     bool                     offerMesh(SMesh&& mesh, bool& joined);
-    // F9: the selection the mesh came from was revoked -> its weight ramps to 0 over meshRampMs (D3-5), leaving plain scale.
+    // The selection the mesh came from was revoked -> its weight ramps to 0 over meshRampMs, leaving plain scale.
     // true -> a drawn mesh started its ramp out.
     bool                     revokeMesh();
 
@@ -72,7 +72,7 @@ class CResizeTransition : public Render::IWindowTransformer {
     const SSnapshot* newContent() const {
         return m_newReady && m_new.fb ? &m_new : nullptr;
     }
-    // The generation's old content (captured at beginGeneration). Readiness builds its D5-1 placeholder alias from it.
+    // The generation's old content (captured at beginGeneration). Readiness builds its placeholder alias from it.
     const SSnapshot& oldContent() const {
         return m_old;
     }
@@ -93,7 +93,7 @@ class CResizeTransition : public Render::IWindowTransformer {
     bool                             m_revoked = false;
     std::chrono::steady_clock::time_point m_revokedAt;
     Vector2D                         m_beginSize, m_goalSize; // size animation value at beginGeneration, and its goal
-    // Size follows Hyprland's animation (D3-2); content follows transition progress, derived from it so both end together:
+    // Size follows Hyprland's animation; content follows transition progress, derived from it so both end together:
     // t = (box - join) / (1 - join), join = box progress when the mesh was taken (0 without a mesh, or with one taken during the hold).
     double                           m_boxProgress = 0; // the box's way from m_beginSize to m_goalSize on the axis that changes most, 0..1
     double                           m_join        = 0;

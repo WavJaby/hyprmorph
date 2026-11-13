@@ -47,7 +47,7 @@ bool CResizeTransition::capture(SSnapshot& out) {
         m_failure = "window gone";
         return false;
     }
-    // F11 scope: X11 has no xdg ack to detect the new buffer; rotated outputs break the monitor-local crop below.
+    // Out of scope: X11 has no xdg ack to detect the new buffer; rotated outputs break the monitor-local crop below.
     if (window->backend().isX11()) {
         m_failure = "X11 window";
         return false;
@@ -104,7 +104,7 @@ bool CResizeTransition::capture(SSnapshot& out) {
                 texturesOk = false;
                 return;
             }
-            // Same viewport-source UV as IElementRenderer::calculateUVForSurface, minus its window-size stretch/crop (the F12 cause).
+            // Same viewport-source UV as IElementRenderer::calculateUVForSurface, minus its window-size stretch/crop (the cause of the native gap/crop artefacts).
             if (state.viewport.hasSource && state.bufferSize.x > 0 && state.bufferSize.y > 0) {
                 const auto& src = state.viewport.source;
                 setCustomUV(ctx, src.pos() / state.bufferSize, (src.pos() + src.size()) / state.bufferSize);
@@ -236,8 +236,8 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     }
     if (blurPx <= 0.)
         return true;
-    // D3-1: soften the summed layers while both are on screen (linear, so the same as blurring each). Plain Gaussian over the whole box:
-    // flat regions are unchanged by it, region edges soften by the same sigma -- D3-1 asks them sharp; a detail-only blur is not built.
+    // Soften the summed layers while both are on screen (linear, so the same as blurring each). Plain Gaussian over the whole box:
+    // flat regions are unchanged by it, region edges soften by the same sigma -- ideally they stay sharp; a detail-only blur is not built.
     if (!m_blurPass)
         m_blurPass = g_pHyprRenderer->createFB("resize-transition blur");
     if (m_blurPass->m_size != monitor->m_pixelSize && !m_blurPass->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
@@ -306,7 +306,7 @@ bool CResizeTransition::prepareFrame(const STransitionConfig& config, bool held)
         else
             m_fade = config.crossfadeSpan <= 0 ? 1.F : std::clamp(sc<float>((m_transition - fadeStart) / config.crossfadeSpan), 0.F, 1.F);
     }
-    // D3-1 blur schedule: 0 at both ends of the fade, peak in its middle (the 2026-09-24 study's sin(pi f)^0.8).
+    // Blur schedule: 0 at both ends of the fade, peak in its middle (sin(pi f)^0.8, chosen in a synthetic study).
     const double blurPx = m_fade > 0.F && m_fade < 1.F ? config.crossfadeBlurPx * std::pow(std::sin(M_PI * m_fade), .8) : 0.;
     if (!compose(size, weight, blurPx))
         return false;

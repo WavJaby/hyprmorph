@@ -1,8 +1,7 @@
 #pragma once
-// Local contour fits inside partition leaves (ports of partition_transition.refine_regions, structure_midpoint.prepare /
-// prepare_side / solve_reference / finish_side / source_grid, shared_mesh_midpoint.structural_lines).
-// Reference Jacobi solve on purpose: its early-stopped iterate is what the d41 leaves hold (the direct solver of
-// reduced-mesh-solvers.md differs by up to .06 px), and parity comes first.
+// Local contour fits inside partition leaves.
+// Weighted Jacobi solve on purpose: the accepted meshes were tuned on its early-stopped iterate; a direct solver
+// differs by up to .06 px.
 #include "pairing.hpp"
 #include "types.hpp"
 

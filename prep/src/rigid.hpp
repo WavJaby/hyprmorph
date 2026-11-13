@@ -1,9 +1,8 @@
 #pragma once
-// Rigid strips + whole-footprint rigid patches (ports of rigid_strip_regions.py and gpu_rigid_patch_probe.py).
+// Rigid strips + whole-footprint rigid patches.
 //
-// Reference behaviour kept on purpose: after the reference's warm-up case, rigid_strip_regions.matches is rebound to
-// the XPU matcher (gpu_rigid_patch_probe.apply_gpu_patches assigns it), so both the "strip" stage and the "patch" stage
-// run the same matcher on the same crops. Here it is computed once per strip leaf (one GPU batch per case) and reused by
+// Both the "strip" stage and the "patch" stage run the same GPU NCC matcher on the same crops (the stages were tuned
+// that way). It is computed once per strip leaf (one GPU batch per case) and reused by
 // both stages -- identical input, identical result, half the NCC work.
 #include "json.hpp"
 #include "strip_ncc.hpp"
@@ -26,7 +25,7 @@ struct Landmark {
     json::Value toJson() const;
 };
 
-// gpu_rigid_patch_probe.matches, CPU part, given the GPU scores of (a, b).
+// Strip matcher, CPU part, given the GPU scores of (a, b).
 std::vector<Landmark> stripLandmarks(const cv::Mat& a, const cv::Mat& b, const StripScores& scores);
 
 struct StripMesh {
@@ -35,7 +34,7 @@ struct StripMesh {
     std::vector<std::array<int, 4>> windows;
 };
 
-// rigid_strip_regions.mesh_for_strip with precomputed landmarks of the (possibly transposed) strip.
+// Strip mesh from precomputed landmarks of the (possibly transposed) strip.
 StripMesh meshForStrip(const cv::Mat& oldPatch, const cv::Mat& newPatch, bool vertical, const double middle[2],
                        const std::vector<Landmark>& landmarks);
 

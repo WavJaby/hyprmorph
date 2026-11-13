@@ -1,7 +1,7 @@
 #pragma once
-// The S1-B + D4-1 preparation chain (port of acceptance_pipeline.run_chain + joint_alignment_probe.select_partition):
+// The mesh preparation chain:
 // ORB -> proposals -> pairing -> baseline + joint partitions on the default midpoint, choose one -> midpoint relayout
-// (F1 vanishing collapse) + local fits -> rigid strips -> rigid patches -> flat absorb -> point constraints.
+// (vanishing regions collapse) + local fits -> rigid strips -> rigid patches -> flat absorb -> point constraints.
 #include "cg.hpp"
 #include "gles.hpp"
 #include "json.hpp"
@@ -21,7 +21,7 @@ namespace prep {
 
 struct Config {
     int maxRegions = 20;           // partition leaf budget (both partitions)
-    bool collapseVanishing = true;  // F1 rule
+    bool collapseVanishing = true;  // collapse regions that vanish in the other image instead of pairing them
     std::vector<std::string> stages{"rigid", "flat", "constraints"};
 };
 

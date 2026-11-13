@@ -63,7 +63,7 @@ int orderStatistic(const int* histogram, int rank) {
 
 namespace {
 
-// Per-pixel line flags of one plane (the step / rule / faint-rule tests of partition_transition.seams at that pixel),
+// Per-pixel line flags of one plane (the step / rule / faint-rule seam tests at that pixel),
 // accumulated down the rows.
 void buildPrefix(const cv::Mat& plane, std::vector<int32_t> (&prefix)[3]) {
     int lines = plane.cols, rows = plane.rows;
@@ -92,7 +92,7 @@ void buildPrefix(const cv::Mat& plane, std::vector<int32_t> (&prefix)[3]) {
                 cr = std::max(cr, std::abs(center - medR));
             }
             int contrast = std::min(cl, cr), lo = std::min(rangeL, rangeR), hi = std::max(rangeL, rangeR);
-            // Integer data: the reference's faint-rule test contrast > 1.5 is contrast >= 2.
+            // Integer data: the faint-rule test contrast > 1.5 is contrast >= 2.
             out[0][g] += stepDiff > 5 && lo <= 12;
             out[1][g] += contrast > 3 && hi <= 12;
             out[2][g] += contrast >= 2 && hi <= 2;
@@ -293,7 +293,7 @@ double violations(int axis, int first, int second, const Box& pa, const Box& pb,
 }
 
 // Mean residual (capped at 30 px) of trusted landmarks between the two sides' default midpoints after the split;
-// float32 like the reference.
+// float32, the precision the partition choice was tuned on.
 std::optional<double> midpointAlignment(const Box& parentA, const Box& parentB, int axis, int first, int second, const Points& source,
                                         const Points& target) {
     if (source.size() < 8) return std::nullopt;
@@ -519,19 +519,19 @@ std::pair<std::string, std::string> choosePreview(std::optional<double> baseCont
     return {"baseline", "insufficient_joint_improvement"};
 }
 
-// ---- midpoint_layout ----
+// ---- midpoint layout ----
 
 namespace {
 
 // An affine needs 3 correspondences; <= 2 matches from a leaf's old content into its own new box = no continuation.
 constexpr int VANISHED_MATCHES = 2;
-// "Narrows sharply": keeps at most a quarter of its extent (reference exit: Facebook sidebar 216 -> 12).
+// "Narrows sharply": keeps at most a quarter of its extent (e.g. a Facebook sidebar 216 -> 12).
 constexpr double SHARP_RATIO = .25;
 
 struct Tree {
     std::map<std::string, std::tuple<int, std::string, std::string>> children;
     std::map<std::string, Leaf*> byName;
-    std::vector<std::string> order;  // leaf names in leaf order (dict iteration order of the reference)
+    std::vector<std::string> order;  // leaf names in leaf order (insertion order, not name order; the relayout walks it)
 };
 
 Tree tree(std::vector<Leaf>& leaves, const std::vector<Split>& splits) {

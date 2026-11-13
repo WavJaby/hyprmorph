@@ -1,5 +1,6 @@
 #pragma once
-// NumPy-equivalent reductions where the reference's discrete decisions depend on them.
+// Reductions with fixed, NumPy-compatible arithmetic where discrete decisions depend on them: the thresholds were tuned against
+// these exact results, so changing summation order, accumulator precision or interpolation shifts decisions.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>

@@ -1,7 +1,7 @@
 #pragma once
-// Point constraints: reliable same-region matches fitted into each leaf's midpoint mesh (port of
-// paired_point_constraints.apply_point_constraints). All regions' CG systems of a case go to the GPU in one dispatch;
-// the RANSAC calls keep the reference order (the solves do not touch the RNG).
+// Point constraints: reliable same-region matches fitted into each leaf's midpoint mesh. All regions' CG systems of a
+// case go to the GPU in one dispatch; the RANSAC calls keep their sequential order, so the RNG sequence and thus the
+// results stay as tuned (the solves do not touch the RNG).
 #include "points.hpp"
 #include "cg.hpp"
 #include "types.hpp"

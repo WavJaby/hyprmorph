@@ -1,5 +1,5 @@
 #pragma once
-// Leaf = one partition region as the Presenter draws it (same JSON shape as experiments/acceptance_pipeline.py).
+// Leaf = one partition region as the Presenter draws it; toJson/leafFromJson define the worker payload's leaf shape.
 // Standard library only: the compositor plugin compiles this file and types.cpp to read the worker's payload.
 #include "json.hpp"
 

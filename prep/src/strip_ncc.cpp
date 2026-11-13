@@ -80,7 +80,7 @@ float ncc(Patch p, Job j, int r, int xx) {
 )GLSL";
 
 // Per patch: peak over allowed positions (first index on ties, row-major like argmax), then the best score outside the
-// peak's +-max(4, width/2) column band (masked positions count as -1, as in the reference).
+// peak's +-max(4, width/2) column band (masked positions count as -1).
 constexpr const char* PEAK = R"GLSL(
 layout(local_size_x=256) in;
 shared float sv[256];
@@ -235,7 +235,7 @@ std::vector<StripScores> StripNcc::score(const std::vector<std::pair<cv::Mat, cv
                     sp += colA[size_t(x + dx)];
                     sp2 += colA2[size_t(x + dx)];
                 }
-                // std > 12 <=> n*sum(x^2) - sum(x)^2 > 144 n^2 (exact; the reference computes float32 std).
+                // std > 12 <=> n*sum(x^2) - sum(x)^2 > 144 n^2 (exact, no float32 std needed).
                 if (int64_t(n) * int64_t(sp2) - int64_t(sp) * int64_t(sp) <= int64_t(144) * n * n) continue;
                 patches.push_back({0, x, width, int32_t(n), uint32_t(sp), uint32_t(sp2), first, 0});
                 owner.emplace_back(int(i), int(result.patches.size()));

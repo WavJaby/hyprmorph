@@ -1,7 +1,5 @@
 #pragma once
-// Region pairing (ports of feature_guided_region_pairing.pair_regions / evidence, structure_midpoint.geometry_cost /
-// select_safe_candidates, feature_guided_small_regions.choose_supported, joint_alignment_probe.verified_landmarks,
-// render_feature_guided_refinement.overlaps_coarse / contained_pair).
+// Region pairing: coarse pairs by geometry + match evidence, safe-candidate selection, supported small pairs, verified landmarks.
 #include "points.hpp"
 #include "proposals.hpp"
 #include "types.hpp"
@@ -14,7 +12,7 @@ namespace prep {
 
 struct Evidence {
     int matches = 0, inliers = 0;
-    double inlierRatio = 0, coverage = 0, boundaryIou = 0, score = 0;  // rounded to 3 decimals like the reference
+    double inlierRatio = 0, coverage = 0, boundaryIou = 0, score = 0;  // rounded to 3 decimals; thresholds were tuned on the rounded values
     json::Value toJson() const;
 };
 
@@ -22,11 +20,11 @@ struct Pair {
     std::string name;
     int oldIndex = 0, newIndex = 0;
     Box oldBox{}, newBox{};
-    double cost = 0;                  // rounded to 4 decimals (the reference stores and reuses the rounded value)
+    double cost = 0;                  // rounded to 4 decimals; later comparisons reuse the rounded value, as tuned
     double geometryCost = 0, margin = 0;
     std::string source;               // "direct-match" / "geometry" (coarse); empty for small pairs
     Evidence evidence;
-    std::optional<std::array<float, 4>> midpoint;  // set by select_safe_candidates (float32 like the reference)
+    std::optional<std::array<float, 4>> midpoint;  // set by selectSafeCandidates (float32: decisions were tuned at that precision)
     const Box& box(int side) const { return side ? newBox : oldBox; }
     json::Value toJson() const;
 };
@@ -55,6 +53,6 @@ void verifiedLandmarks(const Points& source, const Points& target, const std::ve
 Pair candidateWithMidpoint(const Pair& original, Shape oldShape, Shape newShape, Shape size);
 bool conflicts(const Pair& a, const Pair& b);
 bool contained(const cv::Point2f& p, const Box& box);
-int pyroundInt(double value);  // Python round() to int (half to even)
+int pyroundInt(double value);  // round to int, half to even
 
 } // namespace prep

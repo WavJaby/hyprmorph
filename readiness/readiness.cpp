@@ -1,5 +1,5 @@
-// Numerics follow the Python reference operation by operation, including where it compares in float32 (numpy array vs Python scalar
-// compares at the array's precision) and where in double (values converted with float()). Changing either side breaks decision parity.
+// The thresholds in Policy were tuned against this exact arithmetic, operation by operation: which compares run in float32 and which in
+// double, summation order, half-to-even rounding. Changing any of them shifts decisions near the thresholds.
 #include "readiness.hpp"
 
 #include <algorithm>
@@ -112,7 +112,7 @@ Color lowPass(const Image& image, const Policy& policy) {
     const auto kernel = gaussianKernel(policy.blurSigma);
     const int r = static_cast<int>(kernel.size()) / 2, n = static_cast<int>(kernel.size());
     // Horizontal pass reads a reflect-padded copy of each row; vertical pass reads rows through a reflected row table.
-    // Summation order (k = -r..r, one product at a time) is the parity contract with the Python reference; keep it.
+    // Summation order (k = -r..r, one product at a time) is part of the tuned arithmetic; keep it.
     std::vector<float> padded(static_cast<size_t>(w + 2 * r) * 3), rows(static_cast<size_t>(w) * h * 3);
     for (int y = 0; y < h; ++y) {
         const uint8_t* src = image.data + y * image.stride;
@@ -175,7 +175,7 @@ Structure structure(const Color& color, const Policy& policy) {
             horizontal[x] = my > threshold && my > dominance * mx;
         }
     }
-    // Python round() is half-to-even; nearbyint in the default rounding mode matches it.
+    // Half-to-even rounding: nearbyint in the default rounding mode.
     const int verticalLength = std::max(policy.minimumLinePixels, static_cast<int>(std::nearbyint(h * policy.minimumLineFraction)));
     const int horizontalLength = std::max(policy.minimumLinePixels, static_cast<int>(std::nearbyint(w * policy.minimumLineFraction)));
     std::vector<uint8_t> scratch;
@@ -221,7 +221,7 @@ Comparison compare(const Structure& a, const Structure& b, const Policy& policy)
         }
     }
     Comparison c;
-    // float32 division as numpy does it; sums are exact integers in both implementations.
+    // float32 division, as tuned; the sums are exact integers.
     c.edgeDisagreement = static_cast<float>(totalMissing) / static_cast<float>(std::max(1L, totalSupport));
     const float cellLimit = static_cast<float>(policy.cellDisagreement);
     float worst = 0;
@@ -285,7 +285,7 @@ Observation Detector::observe(const Image& frame, double elapsedMs, const Eviden
     }
     o.updateEvidenceReused = reuse;
     if (targetGeometry && o.updated) updateEvidence_ = true;
-    // D5-1: while no different frame has been seen, a protocol-updated frame equal to an old alias is a placeholder. Needs aliases; without
+    // Placeholder rule: while no different frame has been seen, a protocol-updated frame equal to an old alias is a placeholder. Needs aliases; without
     // them (or with the rule off) nothing changes.
     bool placeholderBlocks = false, justAnchored = false;
     if (policy_.placeholderWaitMs > 0 && placeholderPhase_ && o.protocolUpdate && !aliases_.empty()) {

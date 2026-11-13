@@ -1,5 +1,5 @@
 #pragma once
-// Minimal JSON value, parser and writer: leaves in/out and golden parity files. Objects keep insertion order.
+// Minimal JSON value, parser and writer: leaves in/out and the worker payload. Objects keep insertion order.
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -21,7 +21,7 @@ using Array = std::vector<Value>;
 using Object = std::vector<std::pair<std::string, Value>>;
 
 struct Value {
-    // Integers stay integers (Python json writes 1, not 1.0; consumers index arrays with them).
+    // Integers stay integers (written as 1, not 1.0; consumers index arrays with them).
     std::variant<std::nullptr_t, bool, double, std::string, std::shared_ptr<Array>, std::shared_ptr<Object>, int64_t> v = nullptr;
     Value() = default;
     Value(std::nullptr_t) {}
@@ -172,7 +172,7 @@ inline Value parse(const std::string& text) { return Parser(text).value(); }
 inline void number(std::string& out, double d) {
     if (std::isnan(d)) { out += "NaN"; return; }
     if (std::isinf(d)) { out += d > 0 ? "Infinity" : "-Infinity"; return; }
-    // Shortest representation that round-trips (like Python repr); integral floats keep a ".0" so they stay floats.
+    // Shortest representation that round-trips; integral floats keep a ".0" so they stay floats.
     char buffer[40];
     auto [end, error] = std::to_chars(buffer, buffer + sizeof buffer, d);
     std::string_view text(buffer, size_t(end - buffer));

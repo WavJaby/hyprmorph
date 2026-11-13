@@ -1,10 +1,10 @@
-// Animation hold (D3-3): keeps a window's size/position animation at the progress it had when the generation began, so mesh preparation
+// Animation hold: keeps a window's size/position animation at the progress it had when the generation began, so mesh preparation
 // can finish before the box moves; on release the animation plays its full duration from there (total = hold + duration).
 // Mechanism: libhyprutils' own GOT slot for CBaseAnimatedVariable::getPercent points at our function. hyprutils' bezier step reads progress
 // only through that slot (getCurveStep: call *GOT, not inlined -- objdump of libhyprutils 0.14.3), so no Hyprland state is written. Border
-// and content both read m_realSize/m_realPosition, so they stay in sync (D3-2). Spring curves step without getPercent -> never held.
-// Not Hyprland's createFunctionHook: its trampoline jumps are rel32 and the library sits > 2 GB from the trampoline page ("source and
-// trampo are over 2GB apart", nested run 2026-10-30).
+// and content both read m_realSize/m_realPosition, so they stay in sync. Spring curves step without getPercent -> never held.
+// Not Hyprland's createFunctionHook: its trampoline jumps are rel32 and the library sits > 2 GB from the trampoline page (it fails with
+// "source and trampo are over 2GB apart").
 #pragma once
 
 #include <hyprland/src/desktop/DesktopTypes.hpp>

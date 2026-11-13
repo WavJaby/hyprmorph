@@ -49,7 +49,7 @@ namespace {
         std::filesystem::path              dumpDir;  // empty = no dump
         std::ofstream                      manifest;
         int                                dumped = 0;
-        std::optional<Thumbnail::SFrame>   aliasRegion; // D5-1: old content's shared region; the detector is built at the first frame
+        std::optional<Thumbnail::SFrame>   aliasRegion; // placeholder alias: old content's shared region; the detector is built at the first frame
         int                                candidate = 0; // last confirm window announced: Observation::generation + 1, so 0 = none yet
     };
 
@@ -67,8 +67,8 @@ namespace {
         events.push_back(std::move(event));
     }
 
-    // Decisions also go into the dump manifest as comments (replay skips them): plugin/test/dump_parity.py compares them against the
-    // replay without depending on hyprland.log, which is flushed lazily.
+    // Decisions also go into the dump manifest as comments (replay skips them), so an offline replay can be checked against them
+    // without depending on hyprland.log, which is flushed lazily.
     void decide(SGeneration& g, Readiness::SEvent::EKind kind, double elapsedMs) {
         if (g.manifest.is_open())
             g.manifest << std::format("# decision {} {:.3f}\n", kind == Readiness::SEvent::SELECTED ? "select" : kind == Readiness::SEvent::VETOED ? "veto" : "revoke",
@@ -91,7 +91,7 @@ namespace {
             g.manifest << "end\n";
     }
 
-    // RGB PPM: readiness_replay loads .ppm as well as .png.
+    // RGB PPM: written without an image library.
     void dumpFrame(SGeneration& g, const Thumbnail::SFrame& frame) {
         const auto name = std::format("{:x}-{}-{:03d}.ppm", g.window, g.generation, g.dumped);
         std::ofstream out(g.dumpDir / name, std::ios::binary);
@@ -111,7 +111,7 @@ namespace {
                     out.put(static_cast<char>(data[y * stride + x * channels + (channels == 1 ? 0 : c)]));
     }
 
-    // D5-1 crop alias in the new frame's thumbnail space, as aliases_from() builds it for recorded traces: old content pasted top-left on
+    // Placeholder crop alias in the new frame's thumbnail space, built as for the recorded resizes the threshold came from: old content pasted top-left on
     // black, mask = the shared region inset by aliasInset. Built at the first frame because only frames carry the new thumbnail size.
     std::vector<Alias> buildAliases(SGeneration& g, int width, int height) {
         if (!g.aliasRegion)

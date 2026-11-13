@@ -140,7 +140,7 @@ std::vector<Proposal> dedupe(std::vector<Proposal> candidates) {
     return out;
 }
 
-// automatic_object_mesh.proposals
+// Large region proposals from contours.
 std::vector<Proposal> proposals(const cv::Mat& gray, const std::vector<std::vector<cv::Point>>& contours) {
     std::vector<Proposal> candidates;
     double imageArea = double(gray.rows) * gray.cols;
@@ -184,7 +184,7 @@ std::vector<Proposal> proposals(const cv::Mat& gray, const std::vector<std::vect
     return dedupe(candidates);
 }
 
-// small_candidate_sweep.small_proposals(image, 12, 200)
+// Small candidates: near-rectangular contour boxes, sides >= 12, area 200..2000.
 std::vector<Proposal> smallProposals(const std::vector<std::vector<cv::Point>>& contours) {
     constexpr int MIN_SIDE = 12, MIN_AREA = 200;
     std::vector<Proposal> candidates;
@@ -201,7 +201,7 @@ std::vector<Proposal> smallProposals(const std::vector<std::vector<cv::Point>>& 
     return dedupe(candidates);
 }
 
-// structure_midpoint.open_outlines: a top edge + a long aligned side imply an occluded rectangle.
+// Open outlines: a top edge + a long aligned side imply an occluded rectangle.
 std::vector<Proposal> openOutlines(const cv::Mat& gray) {
     cv::Mat edges;
     cv::Canny(gray, edges, 20, 60);
@@ -234,7 +234,7 @@ double centreInside(const Box& outer, const Box& item) {
     return outer[0] - 4 <= cx && cx <= outer[2] + 4 && outer[1] - 4 <= cy && cy <= outer[3] + 4;
 }
 
-// structure_midpoint.discover(image, image): proposals(original) + proposals(filtered) are the same list twice here,
+// discover(image, image): proposals(original) + proposals(filtered) are the same list twice here,
 // and the duplicate copy can never be selected (it overlaps its own twin), so one copy is used.
 std::vector<Proposal> discover(const cv::Mat& gray, const std::vector<Proposal>& found) {
     std::vector<Proposal> outlines = openOutlines(gray), candidates = found;

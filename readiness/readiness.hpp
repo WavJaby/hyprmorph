@@ -1,6 +1,5 @@
 // Layout readiness detector: decides when a window's new-size frames have settled enough to build the transition mesh.
-// C++ port of StructureReadiness / RegionStructureReadiness (experiments/frame_readiness.py, region_layout_readiness.py); the Python code stays
-// the parity reference (D1-5). Contract (ReadinessDetector seam): observe(frame) -> waiting / ready(candidate) / revoked.
+// Contract: observe(frame) -> waiting / ready(candidate) / revoked.
 // No compositor or OpenCV dependency; input is the sampler's GPU thumbnail (already downscaled to the analysis width) as 8-bit pixels.
 #pragma once
 #include <cstdint>
@@ -17,18 +16,18 @@ struct Image {
     const uint8_t* data = nullptr;
 };
 
-// What revokes a selected frame (F8/F9).
+// What revokes a selected frame.
 enum class PostAcceptance {
-    Strict,        // Python reference: any non-quiet frame revokes, so an animated region re-triggers selection
+    Strict,        // any non-quiet frame revokes, so an animated region re-triggers selection
     LayoutChange,  // only a large contour change against the selected frame revokes; smaller changes are content (animation, cursor, scrollbar)
 };
 
 enum class QuietRule {
-    WorstTile,      // StructureReadiness: global edge diff + every informative cell under the cell limit
-    StableRegions,  // RegionStructureReadiness: global edge diff + a stable majority of informative cells (no worst-cell veto)
+    WorstTile,      // global edge diff + every informative cell under the cell limit
+    StableRegions,  // global edge diff + a stable majority of informative cells (no worst-cell veto)
 };
 
-// Every threshold of the detector. Defaults = the adopted layout-amplitude rule (cross-app readiness, RegionStructurePolicy).
+// Every threshold of the detector. Defaults = the adopted layout-amplitude rule (cross-app readiness).
 struct Policy {
     QuietRule quietRule = QuietRule::StableRegions;
     // Timing. Confirm window: the frame must stay quiet this long, over at least this many observations, before it is selected.
@@ -55,17 +54,17 @@ struct Policy {
     double edgeDisagreement = .04;         // global unmatched-edge fraction for quiet
     double cellDisagreement = .30;         // per-cell unmatched fraction: limit (WorstTile) / stable cell (StableRegions)
     double minimumStableCells = .80;       // StableRegions: fraction of informative cells that must be stable
-    // F7 static layout: a client commit at the target surface size, acked after this resize, is update evidence by itself. The aliases model the
+    // Static layout: a client commit at the target surface size, acked after this resize, is update evidence by itself. The aliases model the
     // compositor presenting the old buffer at the new geometry; a new-size client buffer cannot be that, so a layout that legitimately does not
     // move (terminal text anchored top-left) is no longer mistaken for the old crop.
     bool protocolUpdateEvidence = true;
     PostAcceptance postAcceptance = PostAcceptance::LayoutChange;
-    // F9: unmatched-edge fraction against the selected frame that revokes it. Derived by experiments/readiness_rules_gate.py from 250 recorded
-    // traces: post-acceptance changes under the adopted rule reach at most 4.0 % (Discord animated profile background); new-size frames vs
-    // the settled frame leave no value in 12.1-24.9 % above that; .174 = geometric midpoint of that empty interval. The gate fails if they drift.
+    // Unmatched-edge fraction against the selected frame that revokes it. Derived from 250 recorded
+    // resizes: post-acceptance changes under the adopted rule reach at most 4.0 % (Discord animated profile background); new-size frames vs
+    // the settled frame leave no value in 12.1-24.9 % above that; .174 = geometric midpoint of that empty interval.
     double revokeEdgeDisagreement = .174;
-    // D5-1 placeholder: a protocol-updated frame that still matches an old-image alias (old content at its old place) does not start the
-    // confirm window. 0 = rule off. Inert without aliases. Set by readiness_rules_gate.py --placeholder-sweep on 330 recorded resizes:
+    // Placeholder: a protocol-updated frame that still matches an old-image alias (old content at its old place) does not start the
+    // confirm window. 0 = rule off. Inert without aliases. Set by a sweep over 330 recorded resizes:
     // wait 350 = vesktop's longest placeholder life (~276 ms) + ~25 %; no recorded trial reached it, so the static (anchored) path is ungated.
     // After a placeholder the next frame confirms over 20 ms: 0 / 20 / 40 / 60 gave vesktop 237 / 245 / 267 / 287 ms and Chrome 93 / 96 /
     // 114 / 132 ms, all with 0 revocations and 0 accepted-then-changed; 20 keeps 8 ms of margin over 0.
@@ -76,7 +75,7 @@ struct Policy {
     // changes by >= revokeEdgeDisagreement reach at most 9.4 %, frames that stay start at 20.6 %; .139 = geometric midpoint of that gap.
     double placeholderChangedFraction = .139;
 
-    // key=value overrides with the Python field names (quiet_ms, edge_disagreement, ...). Returns false on an unknown key or bad value.
+    // key=value overrides with snake_case keys (quiet_ms, edge_disagreement, ...). Returns false on an unknown key or bad value.
     bool set(const std::string& key, const std::string& value);
     std::string describe() const;  // JSON object
 };
@@ -112,7 +111,7 @@ struct Alias {
 
 enum class Decision { Waiting, Ready, Revoked };
 
-// Per-frame protocol facts from the FrameSource adapter.
+// Per-frame protocol facts from the caller's frame source.
 struct Evidence {
     bool targetGeometry = false;           // window/surface at the accepted target size
     bool newBuffer = false;                // client committed after acking this resize's configure (surface may snap to its own increments)
@@ -127,8 +126,8 @@ struct Observation {
     std::optional<double> quietSinceMs;
     int quietSamples = 0;
     bool ready = false, newlyReady = false, revoked = false, expired = false;
-    bool placeholder = false;  // D5-1: this frame matched an old-image alias while the rule was waiting for a different frame
-    bool anchored = false;     // D5-1: the placeholder outlived the wait limit -> static layout, content stays in place, no mesh needed
+    bool placeholder = false;  // this frame matched an old-image alias while the rule was waiting for a different frame
+    bool anchored = false;     // the placeholder outlived the wait limit -> static layout, content stays in place, no mesh needed
     int generation = 0;  // candidate generation: bumps whenever the confirm window restarts
     std::optional<double> firstUpdateMs, readyMs;
     double analysisMs = 0;  // features + comparisons of this call, CPU wall time
@@ -141,7 +140,7 @@ Comparison compare(const Structure& a, const Structure& b, const Policy& policy)
 AliasDifference aliasDifference(const Color& frame, const Alias& alias, const Policy& policy);
 bool quiet(const Comparison& c, const Policy& policy);
 
-// One detector per window per resize generation (D1-7): the caller creates a new one when the window's generation changes.
+// One detector per window per resize generation: the caller creates a new one when the window's generation changes.
 class Detector {
 public:
     Detector(Policy policy, std::vector<Alias> aliases);
@@ -157,7 +156,7 @@ private:
     std::optional<double> previousMs_, quietSinceMs_, updateMs_, readyMs_;
     int quietSamples_ = 0, generation_ = 0;
     bool updateEvidence_ = false;
-    bool placeholderPhase_ = true, afterPlaceholder_ = false, anchored_ = false;  // D5-1
+    bool placeholderPhase_ = true, afterPlaceholder_ = false, anchored_ = false;  // placeholder rule state
     std::optional<double> placeholderSinceMs_;
 };
 

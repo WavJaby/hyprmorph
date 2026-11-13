@@ -1,6 +1,5 @@
 #pragma once
-// Mesh safety checks shared by every stage (ports of full_window_fallback.minimum_path_area,
-// structure_midpoint.deformation_groups / rectangle_error, partition_transition.audit_leaf).
+// Mesh safety checks shared by every stage.
 #include "types.hpp"
 
 #include <opencv2/core.hpp>
@@ -10,7 +9,7 @@
 namespace prep {
 
 // Analytic minimum signed triangle area along the linear path old -> new grid; coordinates are taken as float32
-// (every reference call site holds float32 grids), arithmetic in double.
+// (every call site holds float32 grids), arithmetic in double.
 double minimumPathArea(const Grid& from, const Grid& to);
 
 struct Protection {
@@ -23,7 +22,7 @@ struct Protection {
 // flat_only = true everywhere in the chain. `patch` is the leaf's image crop.
 Protection deformationGroups(const cv::Mat& patch, const Grid& source, bool flatOnly = true);
 
-// Max deviation from rectangular over protected cells, in float32 like the reference; 0 when none.
+// Max deviation from rectangular over protected cells, in float32 (decisions on it were tuned at that precision); 0 when none.
 double rectangleError(const Grid& grid, const Protection& protection);
 
 // audit_leaf: positive boxes, no fold along the path, protected cells rectangular. False on any violation.

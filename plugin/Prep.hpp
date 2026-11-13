@@ -1,7 +1,7 @@
-// Client of the out-of-process mesh preparation worker (D1-1; Correspondence + MeshBuilder seams of M1). The plugin spawns prep-worker as
+// Client of the out-of-process mesh preparation worker. The plugin spawns prep-worker as
 // a child holding one end of a socketpair and talks prep/src/wire.hpp over it from a client thread, so the compositor thread never blocks
 // on the worker. The worker's life is the connection's: it exits when the plugin closes its end (unload, or a compositor crash).
-// No worker, a dead worker or a refusal all mean the same to the caller: no mesh, the Presenter keeps the plain-scale degenerate mesh (D1-4).
+// No worker, a dead worker or a refusal all mean the same to the caller: no mesh, the Presenter keeps the plain-scale degenerate mesh.
 // A dead worker is not restarted; it comes back with the next start() (plugin reload, or a changed worker path).
 #pragma once
 

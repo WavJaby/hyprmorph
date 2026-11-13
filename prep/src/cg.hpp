@@ -1,7 +1,7 @@
 #pragma once
-// Fixed-iteration regularised conjugate gradient on GLES compute (port of paired_point_constraints.solve_gpu):
+// Fixed-iteration regularised conjugate gradient on GLES compute:
 // minimise |A x - b|^2 + .08 |x|^2 with 96 CG iterations from x = 0, float32, no CPU fallback.
-// The reference builds A dense (<= 6 non-zeros per row); here A is CSR + its transpose, one workgroup per system, all
+// A has <= 6 non-zeros per row, so it is CSR + its transpose rather than dense; one workgroup per system, all
 // iterations inside one dispatch, every system of a call batched into that dispatch.
 #include "gles.hpp"
 
@@ -14,8 +14,8 @@ struct SparseSystem {
     int rows = 0, cols = 0;
     std::vector<int> rowPtr{0}, colIdx;  // CSR of A
     std::vector<float> val, rhs;         // rhs = b (length rows)
-    // Builds one row: duplicates are summed in double, then rounded to float32 (the reference forms the dense matrix
-    // in float64 and casts it with .astype(np.float32)).
+    // Builds one row: duplicates are summed in double, then rounded to float32 once (same values as forming the dense
+    // matrix in float64 and casting it to float32; the tuned results depend on that rounding point).
     void add(int col, double value);
     void endRow(double b);
     static SparseSystem dense(const float* a, int rows, int cols, const float* b);

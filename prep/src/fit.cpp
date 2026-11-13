@@ -13,7 +13,7 @@
 namespace prep {
 namespace {
 
-// Spacing of regular grid lines and number of extra structural lines per axis (source_grid's structural_lines call).
+// Spacing of regular grid lines and number of extra structural lines per axis (source grid).
 constexpr int SPACING = 24, MAX_PEAKS = 4;
 constexpr int MAX_ITERATIONS = 1500;
 constexpr float TOLERANCE = .0005f;
@@ -32,8 +32,8 @@ struct GridF {
     }
 };
 
-// shared_mesh_midpoint.structural_lines(image, axis, spacing=24, maximum=4, smooth): regular lines + strongest
-// gradient lines, float32 like the reference (column means reduce row by row; row means reduce pairwise).
+// Structural lines (spacing 24, at most 4 extra): regular lines + strongest gradient lines, float32 with a fixed
+// reduction order (column means reduce row by row; row means reduce pairwise) -- the line picks were tuned on exactly this.
 std::vector<float> structuralLines(const cv::Mat& smooth, int axis) {
     int height = smooth.rows, width = smooth.cols, length = axis ? height : width;
     std::vector<int> base;
@@ -205,7 +205,7 @@ std::optional<Problem> prepareSide(const cv::Mat& image, Shape size, const std::
     return pr;
 }
 
-// structure_midpoint.solve_reference: weighted Jacobi + group projection, float32 grid / float64 group sums.
+// Midpoint solve: weighted Jacobi + group projection, float32 grid / float64 group sums.
 GridF solveReference(const Problem& pr) {
     int R = pr.source.rows, C = pr.source.cols;
     GridF displacement = pr.displacement, neighbors(R, C), updated(R, C);

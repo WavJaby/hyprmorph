@@ -1,6 +1,6 @@
 // Asynchronous downsampled readback of a texture region: a compute shader box-filters the region into a small RGBA8 image, read back through
-// a pool of fenced PBOs so the compositor never waits on the GPU. 4x4 bilinear taps per output pixel -- the S3 sampler's filter
-// (experiments/native_readiness_sampler.cpp); with an integer 4:1 ratio the taps sit on texel centres, i.e. an exact 4x4 box average.
+// a pool of fenced PBOs so the compositor never waits on the GPU. 4x4 bilinear taps per output pixel -- the filter the
+// readiness thresholds were derived with; with an integer 4:1 ratio the taps sit on texel centres, i.e. an exact 4x4 box average.
 // Users: Thumbnail (readiness frames) and the scheduler's analysis images for the prep worker (main.cpp).
 // All calls need the compositor's EGL context current and run on the compositor thread.
 #pragma once

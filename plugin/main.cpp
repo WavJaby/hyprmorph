@@ -1,14 +1,14 @@
-// Resize transition plugin, skeleton (S1-A): every window size change shows the old snapshot, then the new buffer, plain-scaled into the
-// animated box, with a short crossfade. Replaces the native path's UV stretch/crop (gap on shrink, progressive crop on grow, F12).
+// Resize transition plugin: every window size change shows the old snapshot, then the new buffer, plain-scaled into the
+// animated box, with a short crossfade. Replaces the native path's UV stretch/crop (gap on shrink, progressive crop on grow).
 //
 // Generation trigger: GEOMETRIC_GOAL size change, cause-agnostic (dispatcher, togglefloating, relayout, fullscreen).
 // Capture timing: m_realSize's begin callback only queues sendWindowSize via doLater, and m_events.resize fires on animation ticks, which may
 // run inside renderMonitor. So the goal is checked (and the old snapshot captured) at the two points that precede any texture replacement
 // and run outside a render pass: the window surface's precommit, and render.preChecks of every monitor.
-// Each generation also holds the size/position animation for up to hold_ms (Hold.hpp, D3-3); the old/new switch waits for the release.
-// Readiness (S5): thumbnails of the new-content capture feed a per-generation detector on a worker thread.
-// Prep (S5): each readiness candidate -- a frame that opened a confirm window -- sends the old snapshot and the current new content, at
-// analysis resolution, to the out-of-process prep worker (D1-1), so the mesh is prepared while readiness confirms. Once the candidate is
+// Each generation also holds the size/position animation for up to hold_ms (Hold.hpp); the old/new switch waits for the release.
+// Readiness: thumbnails of the new-content capture feed a per-generation detector on a worker thread.
+// Prep: each readiness candidate -- a frame that opened a confirm window -- sends the old snapshot and the current new content, at
+// analysis resolution, to the out-of-process prep worker, so the mesh is prepared while readiness confirms. Once the candidate is
 // selected and its answer is in, the hold is released and, if the box had not moved yet, the answer becomes the mesh the Presenter draws.
 #include "Hold.hpp"
 #include "Prep.hpp"
@@ -78,7 +78,7 @@ namespace {
         uint64_t                   resizeNs = 0;
         uint32_t                   candidate = 0, asked = 0, selected = 0;
         bool                       candidateStaged = false;
-        // D3-4: windows whose generations began in one layout pass form a group and leave the hold together. settled = this window is
+        // Group hold: windows whose generations began in one layout pass form a group and leave the hold together. settled = this window is
         // done waiting: its mesh is in, or none will come (refusal, no worker, images too small).
         uint64_t                   group = 0;
         bool                       settled = false, waitCounted = false;
@@ -133,7 +133,7 @@ namespace {
         std::string   lastError;
     } workerState;
 
-    // D3-4 group being filled: every generation that begins before the end of the next syncWindows pass joins it -- one layout
+    // Hold group being filled: every generation that begins before the end of the next syncWindows pass joins it -- one layout
     // recalculation sets all its goals before the next render.preChecks, whether a frame or a client's precommit notices them first.
     uint64_t openGroup = 1;
     bool     openGroupUsed = false;
@@ -194,7 +194,7 @@ namespace {
         }
     }
 
-    // D3-3: hold the size/position animation for up to hold_ms; a usable prep answer releases it earlier (onPrepAnswers).
+    // Hold the size/position animation for up to hold_ms; a usable prep answer releases it earlier (onPrepAnswers).
     void hold(const PHLWINDOW& w) {
         if (cfgHoldMs->value() <= 0)
             return;
@@ -296,7 +296,7 @@ namespace {
         }
     }
 
-    // Readiness FrameSource: one thumbnail of this frame's new-content capture per fresh main-surface commit.
+    // Readiness frame source: one thumbnail of this frame's new-content capture per fresh main-surface commit.
     void sample(STracked& t, const PHLWINDOW& w) {
         const auto* content = t.transition->newContent();
         if (!content || !cfgReadiness->value())
@@ -314,7 +314,7 @@ namespace {
             return;
         const auto newPx  = content->contentPx;
         const int  height = Thumbnail::heightFor(newPx.y / newPx.x);
-        // D5-1 alias first, once per generation: the PBO pool completes in submission order, so the worker always has it before the first
+        // Old-content placeholder alias first, once per generation: the PBO pool completes in submission order, so the worker always has it before the first
         // frame. No frame goes out without it -- a frame observed alias-less would bypass the placeholder rule.
         if (t.aliasGeneration != t.generation) {
             const auto& old    = t.transition->oldContent();
@@ -323,7 +323,7 @@ namespace {
             if (!oldTex || !monitor)
                 return;
             const Vector2D shared{std::min(old.contentPx.x, newPx.x), std::min(old.contentPx.y, newPx.y)};
-            // 10 logical px, as aliases_from() masks the recorded traces' crop alias.
+            // 10 logical px: the mask inset the placeholder threshold was derived with on recorded resizes.
             const int             inset = static_cast<int>(std::lround(10. * monitor->m_scale * Thumbnail::WIDTH / newPx.x));
             const Thumbnail::STag aliasTag{.window = id, .generation = t.generation, .sampleNs = nowNs(), .alias = true, .aliasInset = inset};
             if (!Thumbnail::submit(oldTex->m_texID, 0.F, 0.F, shared.x / old.fb->m_size.x, shared.y / old.fb->m_size.y,
@@ -407,7 +407,7 @@ namespace {
                 .crossfadeBlurPx    = cfgCrossfadeBlurPx->value()};
     }
 
-    // D3-3: mesh ready = the selected candidate's answer is in. Offered here: during the hold it plays from the box's start, after it the
+    // Mesh ready = the selected candidate's answer is in. Offered here: during the hold it plays from the box's start, after it the
     // transition joins the moving box if that is still short of the crossfade window. The hold itself ends in releaseGroups, once the whole
     // group is settled.
     void useAnswer(STracked& t) {
@@ -436,7 +436,7 @@ namespace {
                         !drawn ? "plain scale" : joined ? "mesh joined the moving box" : "mesh drawn"));
     }
 
-    // D3-4: a group leaves the hold when every member is settled; until then a settled member waits (its cap still bounds the wait).
+    // A group leaves the hold when every member is settled; until then a settled member waits (its cap still bounds the wait).
     // A member whose transition ended, or that was retargeted into a newer group, no longer counts.
     void releaseGroups() {
         const auto now = Hold::Clock::now();
@@ -744,35 +744,35 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
         throw std::runtime_error("resize-transition: compositor ABI mismatch, rebuild against the running Hyprland");
 
     cfgEnabled = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:enabled", "Draw window size changes through the plugin (0 = native drawing)", true);
-    // 0.3: t 0.5..0.8 (user, 2026-11-12). Without a mesh that is box progress, ~62..128 ms after release on a 479 ms easeOutQuint animation,
+    // 0.3: t 0.5..0.8. Without a mesh that is box progress, ~62..128 ms after release on a 479 ms easeOutQuint animation,
     // box speed 73 % -> 32 % of its peak. Starting at the switch, not before it, lets a late mesh join until box progress 0.5. Tunable.
     cfgCrossfadeSpan = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_span",
                                                                "Old-to-new crossfade length in transition progress (0..1), starting at the old/new switch at 0.5", .3F,
                                                                Config::Values::SFloatValueOptions{.min = 0.F, .max = 1.F});
-    // 1.5 px: D3-1 starting value (M3), from the 2026-09-24 synthetic study, where 12 px made text indistinct.
+    // 1.5 px: untuned starting value; in a synthetic study 12 px made text indistinct.
     cfgCrossfadeBlurPx = makeShared<Config::Values::CFloatValue>("plugin:resize_transition:crossfade_blur_px",
                                                                  "Peak blur (Gaussian sigma, logical px) of the content in the middle of the old/new crossfade (0 = off)",
                                                                  1.5F, Config::Values::SFloatValueOptions{.min = 0.F, .max = 4.F});
-    // 100 ms: D3-1 starting value (M3); now only for new content that arrives after the crossfade window opened.
+    // 100 ms: untuned starting value; only for new content that arrives after the crossfade window opened.
     cfgCrossfadeMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:crossfade_ms",
                                                            "Old-to-new crossfade length in ms when the new-size buffer arrives after the crossfade window opened", 100,
                                                            Config::Values::SIntValueOptions{.min = 0});
-    // 300 ms: covers the Discord pilot's main reflow (max 190 ms) and later update (max 255 ms) after geometry settled (findings.md).
+    // 300 ms: covers Discord's main reflow (max 190 ms) and later update (max 255 ms) after geometry settled, as measured.
     cfgNewBufferTimeoutMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:new_buffer_timeout_ms",
                                                                   "After the size animation ends, ms to keep the scaled old snapshot while waiting for the new-size buffer",
                                                                   300, Config::Values::SIntValueOptions{.min = 0});
-    // 300 ms: D3-3 cap (user, 2026-11-12; was 200). Electron chat clients have their mesh at ~245-315 ms, 200 ms + the ~62 ms join window
-    // missed most of them; a client whose mesh is ready earlier releases the hold then, so only slow clients pay the extra wait. 0 = no hold.
+    // 300 ms: hold cap. Electron chat clients have their mesh at ~245-315 ms; a 200 ms cap + the ~62 ms join window
+    // misses most of them; a client whose mesh is ready earlier releases the hold then, so only slow clients pay the extra wait. 0 = no hold.
     cfgHoldMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:hold_ms",
                                                       "Max ms a window's size/position animation is held at its start while the mesh is prepared (0 = never hold)", 300,
                                                       Config::Values::SIntValueOptions{.min = 0});
     cfgReadiness     = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:readiness", "Sample new content and run the readiness detector (0 = off)", true);
     cfgReadinessDump = makeShared<Config::Values::CStringValue>("plugin:resize_transition:readiness_dump",
-                                                                "Directory for readiness thumbnails + readiness_replay manifests per resize (empty = off; debugging only)", "");
+                                                                "Directory for per-resize readiness thumbnails and a replay manifest (empty = off; debugging only)", "");
     cfgPrepWorker    = makeShared<Config::Values::CStringValue>("plugin:resize_transition:prep_worker",
                                                                 "Path of a prep-worker executable to run instead of the one built into the plugin (empty = built-in)", "");
     cfgMesh       = makeShared<Config::Values::CBoolValue>("plugin:resize_transition:mesh", "Draw the prepared mesh when it is ready before the old/new crossfade starts (0 = plain scale only)", true);
-    // 80 ms: D3-5 starting value (M3) for the mesh weight ramp.
+    // 80 ms: untuned starting value for the mesh weight ramp.
     cfgMeshRampMs = makeShared<Config::Values::CIntValue>("plugin:resize_transition:mesh_ramp_ms",
                                                           "Ms over which a mesh whose content changed under it relaxes back to plain scale", 80,
                                                           Config::Values::SIntValueOptions{.min = 0});

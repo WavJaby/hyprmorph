@@ -14,7 +14,7 @@
 namespace prep {
 namespace {
 
-// Reference limits (docs/reference/correspondence/rigid-patch-icons.md, mesh constraint layer).
+// Tuned limits of the mesh constraint layer (analysis px).
 constexpr size_t MIN_MATCHES = 8;
 constexpr double MIN_INLIER_RATIO = .55, CELL = 12, MEAN_LIMIT = 6, HELD_OUT_P90_LIMIT = 12, IMPROVEMENT = .1;
 constexpr int HELD_OUT_EVERY = 5, DEFAULT_SPACING = 24;
@@ -26,7 +26,7 @@ struct Basis {
     float weight[3];
 };
 
-// Barycentric weights of each point in the grid's triangulation (paired_point_constraints.basis).
+// Barycentric weights of each point in the grid's triangulation.
 std::vector<Basis> basis(const std::vector<cv::Point2d>& points, const Grid& grid) {
     int C = grid.cols, R = grid.rows;
     std::vector<float> xs(static_cast<size_t>(C)), ys(static_cast<size_t>(R));

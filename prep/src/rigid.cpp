@@ -10,7 +10,7 @@
 namespace prep {
 namespace {
 
-// Thresholds of gpu_rigid_patch_probe.matches (analysis px / NCC units), see docs/reference/correspondence/rigid-patch-icons.md.
+// Tuned thresholds of the strip matcher (analysis px / NCC units).
 constexpr double ACCEPT = .93, MARGIN = .035;
 constexpr int REVERSE_TOLERANCE = 4, MAX_GROWN_WIDTH = 48, FOREGROUND_STEP = 18;
 
@@ -28,7 +28,7 @@ std::vector<uint8_t> foregroundMask(const cv::Mat& image, int y, int height) {
     return mask;
 }
 
-// Exact NCC of two equal-size patches (integer sums); the reference computes it in float32 on XPU.
+// Exact NCC of two equal-size patches (integer sums), at least as exact as the float32 NCC the thresholds were tuned on.
 double patchNcc(const cv::Mat& a, const cv::Mat& b) {
     int64_t n = int64_t(a.rows) * a.cols * 3, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
     for (int y = 0; y < a.rows; ++y) {
@@ -109,7 +109,7 @@ json::Value Landmark::toJson() const {
 std::vector<Landmark> stripLandmarks(const cv::Mat& a, const cv::Mat& b, const StripScores& scores) {
     if (scores.height < 5) return {};
     std::vector<Landmark> candidates;
-    // Patches arrive grouped by width; `reverse` indexes this width's valid-patch list (xs[back] in the reference).
+    // Patches arrive grouped by width; `reverse` indexes this width's valid-patch list (the reverse match's patch, x = `back`).
     for (size_t begin = 0; begin < scores.patches.size();) {
         size_t end = begin;
         while (end < scores.patches.size() && scores.patches[end].width == scores.patches[begin].width) ++end;

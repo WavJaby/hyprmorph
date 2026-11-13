@@ -12,7 +12,7 @@
 namespace prep {
 namespace {
 
-// Derivations sit at the reference constants (flat_absorb.py); values must match it exactly.
+// Tuned constants; the accepted flat-absorb results depend on these exact values.
 constexpr int FLAT_STEP = 4, MIN_FLAT_RUN = 3, VERTEX_SPACING = 24, MIN_SCALE_EVIDENCE = 8;
 constexpr double MIN_FLAT_SCALE = .2;
 const double NATIVE_SCALE_TOLERANCE = std::log(1.05);
@@ -64,7 +64,7 @@ bool attachedToEnd(const cv::Mat& a, const cv::Mat& b, int axis) {
     return end < start;
 }
 
-// D4-1 leftover on an axis with no flat run: the identical-line run nearest the free end (one demoted as an
+// Isotropic-shrink leftover on an axis with no flat run: the identical-line run nearest the free end (one demoted as an
 // inter-glyph gap) becomes the axis's flat span, so the region's own background takes the size change instead of a
 // single-axis stretch of the content. All-zero when the axis has no identical lines at all (stays forced).
 std::vector<uint8_t> backgroundAbsorber(const std::vector<uint8_t>& identical, bool toEnd) {
@@ -268,7 +268,7 @@ std::vector<FlatResult> applyFlatAbsorb(const cv::Mat& oldImage, const cv::Mat& 
                 flats[side][axis] = flatIntervals(identical[side][axis]);
                 fits[side][axis] = affordableScale(flats[side][axis], targets[axis], owns[side]);
             }
-        // D4-1: content that does not fit shrinks isotropically by the smallest scale an absorbing axis can afford;
+        // Content that does not fit shrinks isotropically by the smallest scale an absorbing axis can afford;
         // a forced axis (no flat run) would be uniform whatever the factor and does not drive it.
         auto isotropicScale = [&](int side) {
             double factor = 1.;
@@ -304,7 +304,7 @@ std::vector<FlatResult> applyFlatAbsorb(const cv::Mat& oldImage, const cv::Mat& 
         for (int side = 0; side < 2; ++side) {
             double isotropic = isotropicScale(side);
             bool unabsorbed = false;
-            // Residual D4-1 violation: a forced axis visibly off the isotropic scale with no background run to absorb.
+            // Residual isotropy violation: a forced axis visibly off the isotropic scale with no background run to absorb.
             for (auto& [value, absorbs] : fits[side]) unabsorbed |= !absorbs && std::fabs(std::log(value / isotropic)) > NATIVE_SCALE_TOLERANCE;
             std::vector<double> axes[2][2];
             for (int axis = 0; axis < 2; ++axis) {
