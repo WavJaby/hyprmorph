@@ -1,0 +1,9 @@
+[repository]
+name = "hyprmorph"
+authors = ["WavJaby"]
+
+[hyprmorph]
+description = "Window resize transitions that keep content in place while the box animates"
+authors = ["WavJaby"]
+output = "build/hyprmorph.so"
+build = ["make -j$(nproc)"]
