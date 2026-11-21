@@ -4,13 +4,13 @@ A Hyprland plugin that redraws window resize animations so the content keeps its
 
 ![Discord resized without the plugin (left) and with hyprmorph (right), slowed 8x](https://github.com/WavJaby/hyprmorph/releases/download/demo/demo.gif)
 
-Natively, a window that changes size shows its old buffer stretched or cropped until the client sends a buffer at the new size, then jumps to it. This plugin instead:
+Natively, the window box animates but the content does not: each buffer is drawn at its own size in the box's top-left corner, so a shrinking window shows its new, smaller buffer with an empty gap around it, and a growing one shows its old, smaller buffer with an empty area until the client sends one at the new size. This plugin instead:
 
 1. holds the size/position animation at its start for up to `hold_ms` while it prepares the transition;
 2. compares the old content with the client's first new-size frame in a separate worker process and builds a mesh of regions: rigid ones (text, icons, avatars) keep their scale and move, flexible ones (backgrounds, list rows, gaps) stretch;
 3. animates both images along that mesh with the window box and crossfades old to new in the middle of the motion.
 
-When no mesh is ready in time (slow client, refused analysis, animation already running), the window falls back to a plain scale of the old and new images with the same crossfade, never to the native stretch/crop.
+When no mesh is ready in time (slow client, refused analysis, animation already running), the window falls back to a plain scale of the old and new images with the same crossfade, never to the native gap.
 
 ## Status
 
