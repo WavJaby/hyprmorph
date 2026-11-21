@@ -232,6 +232,7 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     if (showNew)
         add(Geometry::NEW, Geometry::MORPH, m_new, m_fade);
     // Clip containers (M4 D4-4): the larger image at full opacity whatever the fade -- layers sum, so the region never crossfades.
+    const size_t clipFrom = count;
     if (meshed) {
         add(Geometry::OLD, Geometry::CLIP, m_old, 1.F);
         if (showNew)
@@ -250,7 +251,7 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     if (blurPx <= 0.)
         return true;
     // Soften the summed layers while both are on screen (linear, so the same as blurring each). Plain Gaussian over the whole box:
-    // flat regions are unchanged by it, region edges soften by the same sigma -- ideally they stay sharp; a detail-only blur is not built.
+    // flat regions are unchanged by it, morph region edges soften by the same sigma -- ideally they stay sharp; a detail-only blur is not built.
     if (!m_blurPass)
         m_blurPass = g_pHyprRenderer->createFB("hyprmorph blur");
     if (m_blurPass->m_size != monitor->m_pixelSize && !m_blurPass->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
@@ -262,6 +263,12 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     if (!pass || !Presenter::blur(m_composed.fb->getTexture()->m_texID, pass->getFBID(), width, height, sigma, true) ||
         !Presenter::blur(m_blurPass->getTexture()->m_texID, target->getFBID(), width, height, sigma, false)) {
         m_failure = pass ? Presenter::failure() : "renderer is not OpenGL";
+        return false;
+    }
+    // Clip containers never crossfade (anchored agreement: same content on both sides), so the blur has nothing to soften there: redraw them
+    // sharp over the blurred sum. After the blur, not excluded before it, so the morph edge next to a container still blends into its content.
+    if (count > clipFrom && !Presenter::compose(target->getFBID(), width, height, std::span{layers + clipFrom, count - clipFrom}, true)) {
+        m_failure = Presenter::failure();
         return false;
     }
     return true;

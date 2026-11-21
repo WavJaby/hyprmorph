@@ -184,7 +184,7 @@ namespace {
     }
 }
 
-bool Presenter::compose(unsigned framebuffer, int width, int height, std::span<const SLayer> layers) {
+bool Presenter::compose(unsigned framebuffer, int width, int height, std::span<const SLayer> layers, bool overwrite) {
     if (!failureText.empty())
         return false;
     SSavedState saved;
@@ -199,11 +199,15 @@ bool Presenter::compose(unsigned framebuffer, int width, int height, std::span<c
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glEnable(GL_SCISSOR_TEST);
     glScissor(0, 0, width, height);
-    glClearColor(0.F, 0.F, 0.F, 0.F);
-    glClear(GL_COLOR_BUFFER_BIT);
-    // Sum of opacity-weighted layers; the cleared target makes the first layer a plain copy.
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE);
+    if (overwrite)
+        glDisable(GL_BLEND);
+    else {
+        glClearColor(0.F, 0.F, 0.F, 0.F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        // Sum of opacity-weighted layers; the cleared target makes the first layer a plain copy.
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+    }
 
     glUseProgram(program);
     glUniform1i(uSource, 0);
