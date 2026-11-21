@@ -34,9 +34,12 @@ std::vector<std::array<Anchor, 2>> anchoredAgreements(const cv::Mat& a, const cv
                 continue;
             }
             cv::absdiff(window(a, x, y), window(b, x, y), difference);
-            double largest = 0;
-            cv::minMaxLoc(difference.reshape(1), nullptr, &largest);
-            if (largest < IDENTICAL_STEP) out.push_back({x, y});
+            // Per pixel: the largest channel step, then the pixels at or above IDENTICAL_STEP.
+            cv::Mat largest = difference.reshape(1, int(difference.total())), changed;
+            cv::reduce(largest, largest, 1, cv::REDUCE_MAX);
+            cv::compare(largest, IDENTICAL_STEP, changed, cv::CMP_GE);
+            const int count = cv::countNonZero(changed);
+            if (count <= AGREEMENT_SLACK_PX && count <= AGREEMENT_SLACK_SHARE * double(w) * h) out.push_back({x, y});
         }
     return out;
 }

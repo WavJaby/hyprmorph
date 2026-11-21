@@ -2,7 +2,7 @@
 
 A Hyprland plugin that redraws window resize animations so the content keeps its layout while the window box animates.
 
-![Discord resized without the plugin (left) and with hyprmorph (right), slowed 8x](https://github.com/WavJaby/hyprmorph/releases/download/demo/demo.gif)
+![Discord resized by Hyprland without the plugin (left, render:expand_undersized_textures off: content squeezed instead of a gap) and with hyprmorph (right), slowed 8x](https://github.com/WavJaby/hyprmorph/releases/download/demo/demo.gif)
 
 Natively, the window box animates but the content does not: each buffer is drawn at its own size in the box's top-left corner, so a shrinking window shows its new, smaller buffer with an empty gap around it, and a growing one shows its old, smaller buffer with an empty area until the client sends one at the new size. This plugin instead:
 
