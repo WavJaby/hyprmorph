@@ -2,7 +2,7 @@
 
 A Hyprland plugin that redraws window resize animations so the content keeps its layout while the window box animates.
 
-![Discord resized with Hyprland's default animation (left) and with hyprmorph (right), slowed 4x](https://github.com/WavJaby/hyprmorph/releases/download/demo/demo.gif)
+![Discord resized without the plugin (left) and with hyprmorph (right), slowed 8x](https://github.com/WavJaby/hyprmorph/releases/download/demo/demo.gif)
 
 Natively, a window that changes size shows its old buffer stretched or cropped until the client sends a buffer at the new size, then jumps to it. This plugin instead:
 
