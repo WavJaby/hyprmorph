@@ -10,31 +10,23 @@
 #include <optional>
 
 namespace prep {
-namespace {
 
-// Tuned constants; the accepted flat-absorb results depend on these exact values.
-constexpr int FLAT_STEP = 4, MIN_FLAT_RUN = 3, VERTEX_SPACING = 24, MIN_SCALE_EVIDENCE = 8;
-constexpr double MIN_FLAT_SCALE = .2;
-const double NATIVE_SCALE_TOLERANCE = std::log(1.05);
-
-// Per interval between adjacent lines: the two lines are identical (every pixel within FLAT_STEP).
 std::vector<uint8_t> identicalIntervals(const cv::Mat& patch, int axis) {
     int lines = axis ? patch.rows : patch.cols, across = axis ? patch.cols : patch.rows;
     std::vector<uint8_t> flat(size_t(lines - 1));
     for (int k = 0; k + 1 < lines; ++k) {
         int step = 0;
-        for (int s = 0; s < across && step < FLAT_STEP; ++s) {
+        for (int s = 0; s < across && step < IDENTICAL_STEP; ++s) {
             const uint8_t* p = axis ? patch.ptr<uint8_t>(k) + s * 3 : patch.ptr<uint8_t>(s) + k * 3;
             const uint8_t* q = axis ? patch.ptr<uint8_t>(k + 1) + s * 3 : patch.ptr<uint8_t>(s) + (k + 1) * 3;
             for (int c = 0; c < 3; ++c) step = std::max(step, std::abs(int(p[c]) - int(q[c])));
         }
-        flat[size_t(k)] = step < FLAT_STEP;
+        flat[size_t(k)] = step < IDENTICAL_STEP;
     }
     return flat;
 }
 
 std::vector<uint8_t> flatIntervals(std::vector<uint8_t> flat) {
-    // Short flat runs are inter-glyph gaps: back to content.
     for (size_t i = 0; i < flat.size();) {
         if (!flat[i]) { ++i; continue; }
         size_t j = i;
@@ -44,6 +36,13 @@ std::vector<uint8_t> flatIntervals(std::vector<uint8_t> flat) {
     }
     return flat;
 }
+
+namespace {
+
+// Tuned constants; the accepted flat-absorb results depend on these exact values.
+constexpr int VERTEX_SPACING = 24, MIN_SCALE_EVIDENCE = 8;
+constexpr double MIN_FLAT_SCALE = .2;
+const double NATIVE_SCALE_TOLERANCE = std::log(1.05);
 
 // Which end of an axis the content stays attached to when the leaf resizes: the end at which the old and new line
 // profiles (mean colour of each line) agree better over their common length. Revealed or hidden content sits at the

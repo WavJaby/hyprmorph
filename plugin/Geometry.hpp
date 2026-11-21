@@ -27,8 +27,13 @@ namespace Geometry {
     };
 
     enum ESide { OLD = 0, NEW = 1 };
+    // MORPH: the leaves that deform, drawn from `side`'s image in that side's crossfade layer. CLIP: the clip containers whose larger
+    // image is `side` (prep::Leaf::clipSource), drawn at full opacity in a layer of their own: no crossfade inside them.
+    enum EPart { MORPH = 0, CLIP = 1 };
 
-    // Appends one side's triangles to `out`. t = geometry progress 0..1; weight = mesh weight: positions are
+    // Appends one side's triangles of one part to `out`. t = geometry progress 0..1; weight = mesh weight: positions are
     // lerp(plain scale, mesh, weight), so 0 draws the degenerate mesh whatever the leaves say.
-    void build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSize newCanvas, ESide side, double t, double weight, SBatch& out);
+    // A clip leaf: box on the shared path, content = its source image 1:1 from the anchored end, cropped to the box (texture window
+    // [s0, s0 + L] or [s1 - L, s1] per axis, L = box length at t in canvas px).
+    void build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSize newCanvas, ESide side, EPart part, double t, double weight, SBatch& out);
 }

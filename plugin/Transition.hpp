@@ -98,7 +98,7 @@ class CResizeTransition : public Render::IWindowTransformer {
     double                           m_boxProgress = 0; // the box's way from m_beginSize to m_goalSize on the axis that changes most, 0..1
     double                           m_join        = 0;
     double                           m_transition  = 0; // t: drives mesh geometry and the old -> new crossfade
-    Geometry::SBatch                 m_batches[2];
+    Geometry::SBatch                 m_batches[2][2]; // [part][side]
     Vector2D                         m_targetAck; // configure size the client must ack (CWaylandBackend::configure records the configured size floored)
     bool                             m_newReady    = false; // client acked the target size; m_new is captured every frame from here
     bool                             m_windowOpen  = false; // t reached the crossfade window (with or without new content)

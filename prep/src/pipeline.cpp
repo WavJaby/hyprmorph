@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 
+#include "clip.hpp"
 #include "constraints.hpp"
 #include "fit.hpp"
 #include "flat.hpp"
@@ -102,22 +103,35 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
 
     auto pendingSeams = std::async(std::launch::async, [&] { return SeamIndex(oldImage); });
     SeamIndex newSeams(newImage), oldSeams = pendingSeams.get();
-    SeamCache seams{oldSeams, newSeams, {}};
-    PartitionResult baseline = baselinePartition(oldShape, newShape, coarse, config.maxRegions, seams);
-    PartitionResult joint = jointPartition(oldShape, newShape, coarse, small, trustedSource, trustedTarget, .7, config.maxRegions, seams);
-    // The partition is chosen on the default (average) midpoint layout: a layout policy must not pick the structure.
-    std::vector<ContourDetail> baseDetails, jointDetails;
-    auto baseContour = contourMidpointError(baseline.leaves, coarse, baseDetails);
-    auto jointContour = contourMidpointError(joint.leaves, coarse, jointDetails);
-    auto baseLandmark = midpointError(baseline.leaves, trustedSource, trustedTarget);
-    auto jointLandmark = midpointError(joint.leaves, trustedSource, trustedTarget);
-    auto [selected, reason] = choosePreview(baseContour, jointContour, baseLandmark, jointLandmark, baseDetails, jointDetails);
+    GutterFinder gutters(oldImage, newImage, source, target);
+    SeamCache seams{oldSeams, newSeams, gutters, {}};
+    PartitionResult baseline = baselinePartition(oldShape, newShape, coarse, config.maxDepth, seams);
+    PartitionResult joint;
+    std::string selected = "baseline", reason = "joint_disabled";
+    if (config.partition == PartitionChoice::Preview) {
+        joint = jointPartition(oldShape, newShape, coarse, small, trustedSource, trustedTarget, .7, config.maxDepth, seams);
+        // The partition is chosen on the default (average) midpoint layout: a layout policy must not pick the structure.
+        std::vector<ContourDetail> baseDetails, jointDetails;
+        auto baseContour = contourMidpointError(baseline.leaves, coarse, baseDetails);
+        auto jointContour = contourMidpointError(joint.leaves, coarse, jointDetails);
+        auto baseLandmark = midpointError(baseline.leaves, trustedSource, trustedTarget);
+        auto jointLandmark = midpointError(joint.leaves, trustedSource, trustedTarget);
+        std::tie(selected, reason) = choosePreview(baseContour, jointContour, baseLandmark, jointLandmark, baseDetails, jointDetails);
+    }
     PartitionResult& chosen = selected == "joint" ? joint : baseline;
     lap("partition");
 
+    // Clip containers join the tree before the midpoint layout (it sees one leaf per container), then leave the leaf list: the fits and
+    // the deforming stages below never touch them. They are appended to the result unchanged.
+    std::vector<std::string> clipNames = mergeClipContainers(oldImage, newImage, chosen);
+    lap("clip_containers");
     std::map<std::string, int> collapse;
     if (config.collapseVanishing) collapse = vanishingCollapses(chosen.leaves, chosen.splits, source, target);
     std::vector<std::string> relaid = relayout(chosen.leaves, chosen.splits, collapse);
+    std::vector<Leaf> clips;
+    for (auto& leaf : chosen.leaves)
+        if (leaf.clip) clips.push_back(leaf);
+    std::erase_if(chosen.leaves, [](const Leaf& leaf) { return leaf.clip.has_value(); });
     std::vector<Pair> refine = coarse;
     for (auto& p : small)
         if (std::any_of(chosen.leaves.begin(), chosen.leaves.end(), [&](const Leaf& l) { return containedPair(p, l); })) refine.push_back(p);
@@ -130,8 +144,12 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
         for (auto& n : relaid) relaidJson.push_back(n);
         out.evidence.set("selected_partition", selected);
         out.evidence.set("selection_reason", reason);
-        out.evidence.set("regions", int(out.leaves.size()));
-        out.evidence.set("max_regions", config.maxRegions);
+        out.evidence.set("regions", int(out.leaves.size() + clips.size()));
+        json::Array clipJson;
+        for (auto& n : clipNames) clipJson.push_back(n);
+        out.evidence.set("clip_containers", clipJson);
+        out.evidence.set("max_depth", config.maxDepth);
+        out.evidence.set("depth_limited", chosen.depthLimited);
         out.evidence.set("paired_cuts", int(out.splits.size()));
         out.evidence.set("matches", int(source.size()));
         out.evidence.set("verified_landmarks", int(trustedSource.size()));
@@ -142,12 +160,11 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
     for (auto& stage : config.stages) {
         if (stage == "rigid") {
             rigid.prepare(oldImage, newImage, out.leaves);
-            int strips = rigid.strips(out.leaves);
-            lap("rigid_strips");
-            int patches = rigid.patches(oldImage, newImage, out.leaves);
-            lap("gpu_patches");
-            out.evidence.set("rigid_strips_accepted", strips);
-            out.evidence.set("gpu_patch_strips_accepted", patches);
+            lap("rigid_scores");
+            if (config.gpuPatches) {
+                out.evidence.set("gpu_patch_strips_accepted", rigid.patches(oldImage, newImage, out.leaves));
+                lap("gpu_patches");
+            }
         } else if (stage == "flat") {
             auto results = applyFlatAbsorb(oldImage, newImage, out.leaves, source, target);
             lap("flat_absorb");
@@ -170,6 +187,7 @@ Result Preparer::run(const cv::Mat& oldImage, const cv::Mat& newImage, const Con
         } else
             throw std::runtime_error("unknown stage " + stage);
     }
+    out.leaves.insert(out.leaves.end(), std::make_move_iterator(clips.begin()), std::make_move_iterator(clips.end()));
     return out;
 }
 

@@ -32,6 +32,11 @@ json::Value toJson(const Leaf& leaf) {
     out.set("old_box", box(leaf.oldBox));
     out.set("new_box", box(leaf.newBox));
     out.set("midpoint_box", box(leaf.midpointBox));
+    if (leaf.clip) {
+        json::Array anchor;
+        for (Anchor a : *leaf.clip) anchor.push_back(a == Anchor::End ? "end" : "start");
+        out.set("clip_anchor", anchor);
+    }
     if (leaf.meshes) {
         json::Value meshes = json::Value::object();
         meshes.set("old_source", toJson(leaf.meshes->oldSource));
@@ -60,6 +65,8 @@ Leaf leafFromJson(const json::Value& value) {
         leaf.newBox[size_t(k)] = int(value["new_box"][size_t(k)].num());
         leaf.midpointBox[size_t(k)] = value["midpoint_box"][size_t(k)].num();
     }
+    if (auto anchor = value.find("clip_anchor"))
+        leaf.clip = std::array<Anchor, 2>{(*anchor)[0].str() == "end" ? Anchor::End : Anchor::Start, (*anchor)[1].str() == "end" ? Anchor::End : Anchor::Start};
     if (auto meshes = value.find("local_meshes"); meshes && meshes->isObject() && meshes->size()) {
         Meshes m;
         m.oldSource = gridFromJson((*meshes)["old_source"]);

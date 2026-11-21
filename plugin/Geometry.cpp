@@ -9,7 +9,7 @@ namespace {
     }
 }
 
-void Geometry::build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSize newCanvas, ESide side, double t, double weight, SBatch& out) {
+void Geometry::build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSize newCanvas, ESide side, EPart part, double t, double weight, SBatch& out) {
     // Leaf boxes: one path for both sides, old -> midpoint over t 0..0.5, midpoint -> new over 0.5..1, so in a crossfade the two layers'
     // leaves coincide. Interior: each side's own grid, 0 at its endpoint and 1 (the midpoint shape) on the other half -- a grid is only
     // defined between its endpoint and the midpoint. Do not freeze a side's whole layout at the midpoint instead: drawn in the box of a
@@ -22,6 +22,8 @@ void Geometry::build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSi
     const std::array<double, 2> ownSize{own.w, own.h}, canvasSize{canvas.w, canvas.h}, oldSize{oldCanvas.w, oldCanvas.h}, newSize{newCanvas.w, newCanvas.h};
 
     for (const auto& leaf : leaves) {
+        if (leaf.clip.has_value() != (part == CLIP) || (leaf.clip && leaf.clipSource() != side))
+            continue;
         const auto&           source = leaf.box(side);
         std::array<double, 4> box;
         for (size_t k = 0; k < 4; ++k)
@@ -50,10 +52,21 @@ void Geometry::build(const std::vector<prep::Leaf>& leaves, SSize oldCanvas, SSi
         }
         const bool meshed = grid && grid->rows >= 2 && grid->cols >= 2 && middle->rows == grid->rows && middle->cols == grid->cols;
         if (!meshed) {
-            emit(source[0], source[1], box[0], box[1]);
-            emit(source[2], source[1], box[2], box[1]);
-            emit(source[0], source[3], box[0], box[3]);
-            emit(source[2], source[3], box[2], box[3]);
+            // Plain leaf: the whole source patch scaled to the box. Clip leaf: the box-sized window of it at the anchored end (the box path
+            // stays within the source patch, the clamp only absorbs a midpoint box that leaves it).
+            std::array<double, 4> window{double(source[0]), double(source[1]), double(source[2]), double(source[3])};
+            if (leaf.clip)
+                for (size_t axis = 0; axis < 2; ++axis) {
+                    const double length = std::min(size[axis], double(source[axis + 2] - source[axis]));
+                    if ((*leaf.clip)[axis] == prep::Anchor::End)
+                        window[axis] = source[axis + 2] - length;
+                    else
+                        window[axis + 2] = source[axis] + length;
+                }
+            emit(window[0], window[1], box[0], box[1]);
+            emit(window[2], window[1], box[2], box[1]);
+            emit(window[0], window[3], box[0], box[3]);
+            emit(window[2], window[3], box[2], box[3]);
             for (uint32_t i : {0u, 1u, 3u, 0u, 3u, 2u})
                 out.indices.push_back(base + i);
             continue;

@@ -21,6 +21,7 @@ json::Value Seam::toJson() const {
     out.set("right_color", json::Array{right[0], right[1], right[2]});
     if (landmarkError) out.set("landmark_error_px", *landmarkError);
     if (!pair.empty()) out.set("pair", pair);
+    if (gutterLines) out.set("gutter_lines", json::Array{(*gutterLines)[0], (*gutterLines)[1]});
     if (detected) {
         out.set("detected_position", *detected);
         out.set("snap_to_contour", snap);
@@ -43,7 +44,6 @@ json::Value Split::toJson() const {
 
 namespace {
 
-constexpr int MARGIN = 8;
 constexpr double THRESHOLDS[3] = {.60, .75, .88};
 const char* KINDS[3] = {"step", "rule", "faint-rule"};
 
@@ -113,12 +113,12 @@ SeamIndex::SeamIndex(const cv::Mat& source) {
 std::vector<Seam> SeamIndex::seams(const Box& box, int axis) const {
     int start = box[size_t(axis)], length = box[size_t(axis) + 2] - box[size_t(axis)];
     int s0 = box[size_t(1 - axis)], s1 = box[size_t(3 - axis)], span = s1 - s0;
-    if (length < 2 * MARGIN + 8 || span < 24) return {};
+    if (length < 2 * SEAM_MARGIN + 8 || span < 24) return {};
     const cv::Mat& plane = planes[axis];
     size_t lines = size_t(plane.cols);
     auto pixel = [&](int line, int s, int c) { return int(plane.ptr<uint8_t>(s)[line * 3 + c]); };
     std::vector<Seam> candidates;
-    for (int p = MARGIN; p <= length - MARGIN; ++p) {
+    for (int p = SEAM_MARGIN; p <= length - SEAM_MARGIN; ++p) {
         int g = start + p;
         double supports[3];
         int kind = -1;
@@ -209,18 +209,41 @@ struct Option {
     std::string origin;
 };
 
+// The node's gutter cut as a split option, when it has one.
+std::optional<Option> gutterOption(SeamCache& seams, const Box& a, const Box& b) {
+    const auto& cut = seams.gutters.find(a, b);
+    if (!cut) return std::nullopt;
+    Seam first, second;
+    first.position = cut->oldPosition;
+    second.position = cut->newPosition;
+    first.relative = double(cut->oldPosition - a[size_t(cut->axis)]) / (a[size_t(cut->axis) + 2] - a[size_t(cut->axis)]);
+    second.relative = double(cut->newPosition - b[size_t(cut->axis)]) / (b[size_t(cut->axis) + 2] - b[size_t(cut->axis)]);
+    first.quality = second.quality = cut->score;
+    first.kind = second.kind = "gutter";
+    first.gutterLines = cut->oldLines;
+    second.gutterLines = cut->newLines;
+    return Option{cut->score, cut->axis, first, second, cut->origin};
+}
+
 template <typename Choose>
-PartitionResult partition(Shape oldShape, Shape newShape, int maximum, Choose choose, bool snap, const std::vector<Pair>& candidates) {
+PartitionResult partition(Shape oldShape, Shape newShape, int maxDepth, Choose choose, bool snap, const std::vector<Pair>& candidates) {
     PartitionResult out;
     struct Item { std::string name; Box a, b; int depth; };
     std::deque<Item> frontier{{"body", {0, 0, oldShape.width, oldShape.height}, {0, 0, newShape.width, newShape.height}, 0}};
     while (!frontier.empty()) {
         Item item = frontier.front();
         frontier.pop_front();
-        // Rigidly translated regions already preserve their structure: spend the budget where dimensions change.
+        // Rigidly translated regions already preserve their structure: split only where dimensions change. No leaf budget: a cut needs
+        // evidence (seam, or a gutter whose sides move apart), and the depth bounds the tree.
         std::optional<Option> option;
-        if (item.depth < 7 && !unchangedExtent(item.a, item.b)) option = choose(item.a, item.b);
-        if (!option || int(out.leaves.size() + frontier.size()) + 2 > maximum) {
+        if (!unchangedExtent(item.a, item.b)) {
+            option = choose(item.a, item.b);
+            if (option && item.depth >= maxDepth) {
+                ++out.depthLimited;
+                option.reset();
+            }
+        }
+        if (!option) {
             Leaf leaf;
             leaf.name = item.name;
             leaf.kind = "complete-region-fallback";
@@ -231,7 +254,7 @@ PartitionResult partition(Shape oldShape, Shape newShape, int maximum, Choose ch
         }
         Option o = *option;
         int axis = o.axis;
-        if (snap)
+        if (snap && o.first.kind != "gutter")
             // A line detector finds an edge pixel, a container box has exclusive bounds: snap near-agreeing evidence to
             // the accepted contour so a one-pixel convention difference cannot split the object.
             for (auto& c : candidates) {
@@ -337,7 +360,7 @@ std::optional<double> midpointAlignment(const Box& parentA, const Box& parentB, 
 
 } // namespace
 
-PartitionResult baselinePartition(Shape oldShape, Shape newShape, const std::vector<Pair>& candidates, int maximum, SeamCache& seams) {
+PartitionResult baselinePartition(Shape oldShape, Shape newShape, const std::vector<Pair>& candidates, int maxDepth, SeamCache& seams) {
     auto choose = [&](const Box& a, const Box& b) -> std::optional<Option> {
         auto& evidence = seams.get(a, b);
         std::optional<Option> best;
@@ -355,13 +378,13 @@ PartitionResult baselinePartition(Shape oldShape, Shape newShape, const std::vec
                         if (!best || score > best->score) best = Option{score, axis, first, second, ""};
                     }
                 }
-        return best;
+        return best ? best : gutterOption(seams, a, b);
     };
-    return partition(oldShape, newShape, maximum, choose, true, candidates);
+    return partition(oldShape, newShape, maxDepth, choose, true, candidates);
 }
 
 PartitionResult jointPartition(Shape oldShape, Shape newShape, const std::vector<Pair>& contourPairs, const std::vector<Pair>& smallPairs,
-                               const Points& source, const Points& target, double alignmentWeight, int maximum, SeamCache& seams) {
+                               const Points& source, const Points& target, double alignmentWeight, int maxDepth, SeamCache& seams) {
     std::vector<const Pair*> all;
     for (auto& p : contourPairs) all.push_back(&p);
     for (auto& p : smallPairs) all.push_back(&p);
@@ -416,9 +439,9 @@ PartitionResult jointPartition(Shape oldShape, Shape newShape, const std::vector
                 }
             }
         }
-        return best;
+        return best ? best : gutterOption(seams, a, b);
     };
-    return partition(oldShape, newShape, maximum, choose, false, {});
+    return partition(oldShape, newShape, maxDepth, choose, false, {});
 }
 
 namespace {
@@ -523,8 +546,6 @@ std::pair<std::string, std::string> choosePreview(std::optional<double> baseCont
 
 namespace {
 
-// An affine needs 3 correspondences; <= 2 matches from a leaf's old content into its own new box = no continuation.
-constexpr int VANISHED_MATCHES = 2;
 // "Narrows sharply": keeps at most a quarter of its extent (e.g. a Facebook sidebar 216 -> 12).
 constexpr double SHARP_RATIO = .25;
 

@@ -105,10 +105,10 @@ namespace {
     // stale = answers for a superseded generation or candidate (speculation that did not pay); early = usable answers that were in before
     // their candidate was selected; inHold / afterHold = usable answers by whether the hold was still on; meshDrawn / meshLate = usable
     // answers the transition took / refused because its box was past the crossfade window; meshJoined = drawn meshes taken after the box
-    // started moving; meshRevoked = drawn meshes whose selection was revoked.
+    // started moving; meshRevoked = drawn meshes whose selection was revoked; clipContainers = clip-container leaves (M4 D4-4) in drawn meshes.
     struct SPrepCounters {
         unsigned long staged = 0, stageRetries = 0, tooSmall = 0, stale = 0, early = 0, inHold = 0, afterHold = 0, meshDrawn = 0, meshLate = 0, meshJoined = 0,
-                      meshRevoked = 0;
+                      meshRevoked = 0, clipContainers = 0;
     } prepCounts;
     std::vector<double> meshReadyMs; // resize -> usable answer, per answer
 
@@ -418,6 +418,7 @@ namespace {
         const bool held    = Hold::held(w, now);
         const auto readyMs = (nowNs() - t.resizeNs) / 1e6;
         const auto leaves  = a.leaves.size();
+        const auto clips   = std::ranges::count_if(a.leaves, [](const prep::Leaf& l) { return l.clip.has_value(); });
         bool       joined  = false;
         const bool drawn   = cfgMesh->value() && t.transition->offerMesh({std::move(a.leaves),
                                                                           {static_cast<double>(a.oldWidth), static_cast<double>(a.oldHeight)},
@@ -428,11 +429,13 @@ namespace {
         ++(drawn ? prepCounts.meshDrawn : prepCounts.meshLate);
         if (joined)
             ++prepCounts.meshJoined;
+        if (drawn)
+            prepCounts.clipContainers += static_cast<unsigned long>(clips);
         meshReadyMs.push_back(readyMs);
         recordAnswer({.window = a.window, .generation = a.generation, .candidate = a.candidate, .readyMs = readyMs, .prepMs = a.prepMs,
                       .outcome = !drawn ? "late" : joined ? "joined" : "drawn"});
-        trace(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
-                        a.generation, a.candidate, readyMs, leaves, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
+        trace(std::format("prep 0x{:x} gen {} candidate {}: mesh ready {:.1f} ms after resize ({} leaves, {} clip, prep {:.1f} ms, round trip {:.1f} ms), {}, {}", a.window,
+                        a.generation, a.candidate, readyMs, leaves, clips, a.prepMs, a.roundTripMs, held ? "hold released" : "hold already over",
                         !drawn ? "plain scale" : joined ? "mesh joined the moving box" : "mesh drawn"));
     }
 
@@ -722,7 +725,8 @@ namespace {
             {"prep", object({{"staged", prepCounts.staged}, {"stage_retries", prepCounts.stageRetries}, {"too_small", prepCounts.tooSmall},
                              {"requests", pc.requests}, {"dropped", pc.dropped}, {"replaced", pc.replaced}, {"ok", pc.ok}, {"refused", pc.refused},
                              {"stale", prepCounts.stale}, {"early", prepCounts.early}, {"in_hold", prepCounts.inHold}, {"after_hold", prepCounts.afterHold}})},
-            {"mesh", object({{"drawn", prepCounts.meshDrawn}, {"joined", prepCounts.meshJoined}, {"late", prepCounts.meshLate}, {"revoked", prepCounts.meshRevoked}})},
+            {"mesh", object({{"drawn", prepCounts.meshDrawn}, {"joined", prepCounts.meshJoined}, {"late", prepCounts.meshLate}, {"revoked", prepCounts.meshRevoked},
+                             {"clip_containers", prepCounts.clipContainers}})},
             {"group", object({{"group_releases", groupCounts.groupReleases}, {"group_waits", groupCounts.groupWaits}})},
             {"readback", object({{"analysis", readback(analysisPool.counters())}, {"thumbnail", readback(Thumbnail::counters())}})},
             {"detach", reasons},

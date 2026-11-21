@@ -211,24 +211,37 @@ bool CResizeTransition::compose(const Vector2D& boxSize, float weight, double bl
     }
     const auto& leaves = meshed ? m_mesh->leaves : whole;
 
-    Presenter::SLayer layers[2];
+    Presenter::SLayer layers[4];
     size_t            count = 0;
-    const auto        add   = [&](Geometry::ESide side, const SSnapshot& snap, float opacity) {
+    const auto        add   = [&](Geometry::ESide side, Geometry::EPart part, const SSnapshot& snap, float opacity) {
         if (opacity <= 0.F)
             return;
-        auto& batch = m_batches[side];
+        auto& batch = m_batches[part][side];
         batch.vertices.clear();
         batch.indices.clear();
-        Geometry::build(leaves, oldCanvas, newCanvas, side, m_transition, meshed ? weight : 0., batch);
+        Geometry::build(leaves, oldCanvas, newCanvas, side, part, m_transition, meshed ? weight : 0., batch);
+        if (batch.indices.empty())
+            return;
         layers[count++] = {.texture = snap.fb->getTexture()->m_texID,
                            .uExtent = sc<float>(snap.contentPx.x / snap.fb->m_size.x),
                            .vExtent = sc<float>(snap.contentPx.y / snap.fb->m_size.y),
                            .batch   = &batch,
                            .opacity = opacity};
     };
-    add(Geometry::OLD, m_old, showNew ? 1.F - m_fade : 1.F);
+    add(Geometry::OLD, Geometry::MORPH, m_old, showNew ? 1.F - m_fade : 1.F);
     if (showNew)
-        add(Geometry::NEW, m_new, m_fade);
+        add(Geometry::NEW, Geometry::MORPH, m_new, m_fade);
+    // Clip containers (M4 D4-4): the larger image at full opacity whatever the fade -- layers sum, so the region never crossfades.
+    if (meshed) {
+        add(Geometry::OLD, Geometry::CLIP, m_old, 1.F);
+        if (showNew)
+            add(Geometry::NEW, Geometry::CLIP, m_new, 1.F);
+        else if (std::ranges::any_of(leaves, [](const prep::Leaf& l) { return l.clip && l.clipSource() == Geometry::NEW; })) {
+            // Cannot happen: a mesh is prepared from captured new content, so m_new exists before any mesh is offered.
+            m_failure = "clip container drawn from new content before it was captured";
+            return false;
+        }
+    }
     const int width = sc<int>(m_composed.contentPx.x), height = sc<int>(m_composed.contentPx.y);
     if (!Presenter::compose(target->getFBID(), width, height, std::span{layers, count})) {
         m_failure = Presenter::failure();

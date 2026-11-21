@@ -44,10 +44,8 @@ StripOrientation stripOrientation(const Leaf& leaf);
 class RigidStage {
 public:
     explicit RigidStage(StripNcc& ncc) : ncc(ncc) {}
-    // Scores every strip leaf once (one GPU batch); must run before strips()/patches() of the same leaves.
+    // Scores every strip leaf once (one GPU batch); must run before patches() of the same leaves.
     void prepare(const cv::Mat& oldImage, const cv::Mat& newImage, const std::vector<Leaf>& leaves);
-    // apply_rigid_strips: meshes for unrefined strip leaves. Returns accepted count.
-    int strips(std::vector<Leaf>& leaves);
     // apply_gpu_patches: meshes for every strip leaf, each gated by audit_leaf. Returns accepted count.
     int patches(const cv::Mat& oldImage, const cv::Mat& newImage, std::vector<Leaf>& leaves);
     json::Value report = json::Value::array();

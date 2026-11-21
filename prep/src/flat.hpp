@@ -10,6 +10,19 @@
 
 namespace prep {
 
+// Two pixels are the same colour when every channel differs by less than this (8-bit analysis images). The plugin's analysis image is an
+// exact 4x4 box average, so unchanged content reproduces bit-for-bit; the margin covers GPU rounding only.
+constexpr int IDENTICAL_STEP = 4;
+// A flat run (blank band: background the mesh may stretch, a gutter the partition may cut) spans at least this many identical intervals;
+// shorter runs are inter-glyph gaps. Tuned: the accepted flat-absorb results depend on this exact value.
+constexpr int MIN_FLAT_RUN = 3;
+
+// Per interval between adjacent lines (axis 0: columns, 1: rows) of an 8-bit BGR patch: the two lines are identical (every pixel within
+// IDENTICAL_STEP).
+std::vector<uint8_t> identicalIntervals(const cv::Mat& patch, int axis);
+// `identicalIntervals` with runs shorter than MIN_FLAT_RUN returned to content.
+std::vector<uint8_t> flatIntervals(std::vector<uint8_t> identical);
+
 struct FlatResult {
     int region = 0;
     std::string name;

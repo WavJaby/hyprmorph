@@ -353,26 +353,6 @@ void RigidStage::prepare(const cv::Mat& oldImage, const cv::Mat& newImage, const
     }
 }
 
-int RigidStage::strips(std::vector<Leaf>& leaves) {
-    int accepted = 0;
-    for (auto& [i, strip] : meshes) {
-        Leaf& leaf = leaves[size_t(i)];
-        if (leaf.meshes) continue;
-        json::Value row = json::Value::object();
-        row.set("stage", "rigid_strips");
-        row.set("region", i);
-        row.set("name", leaf.name);
-        for (auto& [k, v] : strip.result.obj()) row.set(k, v);
-        report.push(row);
-        if (!strip.mesh) continue;
-        leaf.meshes = strip.mesh;
-        leaf.rigid = strip.result;
-        leaf.windows = strip.windows;
-        ++accepted;
-    }
-    return accepted;
-}
-
 int RigidStage::patches(const cv::Mat& oldImage, const cv::Mat& newImage, std::vector<Leaf>& leaves) {
     int accepted = 0;
     for (auto& [i, strip] : meshes) {

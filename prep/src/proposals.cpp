@@ -73,7 +73,7 @@ void matchImages(const cv::Mat& oldImage, const cv::Mat& newImage, Points& sourc
     source.clear();
     target.clear();
     auto detect = [](const cv::Mat& image, std::vector<cv::KeyPoint>& keys, cv::Mat& descriptors) {
-        auto detector = cv::ORB::create(1500, 1.2f, 8, 15, 0, 2, cv::ORB::HARRIS_SCORE, 31, 10);
+        auto detector = cv::ORB::create(1500, ORB_SCALE, ORB_LEVELS, 15, 0, 2, cv::ORB::HARRIS_SCORE, 31, 10);
         cv::Mat gray;
         cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
         detector->detectAndCompute(gray, cv::noArray(), keys, descriptors);

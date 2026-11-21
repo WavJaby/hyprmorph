@@ -19,10 +19,16 @@
 
 namespace prep {
 
+enum class PartitionChoice { Preview, Baseline };
+
 struct Config {
-    int maxRegions = 20;           // partition leaf budget (both partitions)
+    int maxDepth = 7;              // partition split depth from the root (both partitions); the only bound on the tree
     bool collapseVanishing = true;  // collapse regions that vanish in the other image instead of pairing them
+    // Preview: build baseline + joint, pick by the midpoint preview. Baseline: joint is never built (ablation).
+    PartitionChoice partition = PartitionChoice::Preview;
     std::vector<std::string> stages{"rigid", "flat", "constraints"};
+    // "rigid" stage without its audited GPU patches (ablation): strip scores are computed but no mesh is installed.
+    bool gpuPatches = true;
 };
 
 struct Result {
